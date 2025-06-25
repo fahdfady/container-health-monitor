@@ -98,23 +98,27 @@ fn get_containers_health() -> Result<(), Box<dyn std::error::Error>> {
 fn container_stats(container_name: &str) -> Result<ContainerHealth, Box<dyn std::error::Error>> {
     let status = get_container_status(container_name);
 
+    if status != "running" {
+        return Ok(ContainerHealth {
+            name: container_name.to_string(),
+            status,
+            cpu_percent: 0,
+            memory_usage: "0B".to_string(),
+            memory_percent: 0,
+        });
+    }
+
     let mut binding = Command::new("docker");
     let cmd = binding.args(&["stats", "--no-stream", "format"]);
-    let cpu_str = if status == "running" {
-        std::str::from_utf8(&cmd.args(["{{.CPUPerc}}"]).output()?.stdout)?.trim().to_owned()
-    } else {
-        "0%".to_string()
-    };
+    let cpu_str = std::str::from_utf8(&cmd.args(["{{.CPUPerc}}"]).output()?.stdout)?
+        .trim()
+        .to_owned();
 
     let cpu_percent = cpu_str.trim_end_matches("%").parse::<usize>().unwrap_or(0);
 
     println!("CPU PERCENT {}", cpu_percent);
-    let memory_percent: usize = if status == "running" { 2 } else { 0 };
-    let memory_usage: String = if status == "running" {
-        String::from("eqweqwe")
-    } else {
-        String::from("")
-    };
+    let memory_percent: usize = 2;
+    let memory_usage: String = String::from("eqweqwe");
 
     Ok(ContainerHealth {
         name: container_name.to_string(),
