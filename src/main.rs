@@ -3,6 +3,14 @@ use std::process::Command;
 use color_print::cprintln;
 use redis::{self, Client, Commands};
 
+struct ContainerHealth {
+    name: String,
+    status: String,
+    cpu_percent: usize,
+    memory_usage: String,
+    memory_percent: usize,
+}
+
 fn main() -> redis::RedisResult<()> {
     println!("Hello, world!");
 
@@ -13,18 +21,42 @@ fn main() -> redis::RedisResult<()> {
 
     let _: () = conn.set_ex("key", "value", 1)?;
 
-    let container_status = get_container_status("sad_pare");
-    println!("container status {}", container_status);
+    let container = ContainerHealth {
+        name: String::from("sad_pare"),
+        status: String::from("running"),
+        cpu_percent: 10,
+        memory_usage: String::from("200 MB"),
+        memory_percent: 6,
+    };
+
+    let status_emoji: &str = match container.status.as_str() {
+        "running" => "🟢",
+        "exited" => "🔴",
+        _ => "⚪",
+    };
+
+    // println!("container status: {} {}", status_emoji, container_status);
+
+    println!(
+        "{} {} {} | CPU: {:.1}% | Mem: {} ({:.1}%)",
+        status_emoji,
+        container.status,
+        container.name,
+        container.cpu_percent,
+        container.memory_usage,
+        container.memory_percent
+    );
+
     Ok(())
 }
 
 fn get_container_status(name: &str) -> String {
-    let output = Command::new("docker")
+    let status_output = Command::new("docker")
         .args(&["inspect", name, "--format", "{{.State.Status}}"])
         .output()
         .expect("msg");
 
-    std::str::from_utf8(&output.stdout)
+    std::str::from_utf8(&status_output.stdout)
         .unwrap()
         .trim()
         .to_string()
