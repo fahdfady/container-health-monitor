@@ -1,0 +1,2 @@
+- [ ] monitor all containers on the machine
+- [ ] add a cli utility to enter the data of a container
