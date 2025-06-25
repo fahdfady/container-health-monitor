@@ -73,12 +73,61 @@ fn main() -> redis::RedisResult<()> {
 
     println!("{}", container);
 
+    get_containers_health().unwrap();
+
     Ok(())
 }
 
-fn get_container_status(name: &str) -> String {
+fn get_containers_health() -> Result<(), Box<dyn std::error::Error>> {
+    let ps_output = Command::new("docker")
+        .args(&["ps", "-a", "--format", "{{.Names}}"])
+        .output()?;
+
+    let stdout = std::str::from_utf8(&ps_output.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let container_names: Vec<&str> = stdout.lines().filter(|line| !line.is_empty()).collect();
+    container_stats("redis")?;
+    println!("{:?}", container_names);
+
+    Ok(())
+}
+
+fn container_stats(container_name: &str) -> Result<ContainerHealth, Box<dyn std::error::Error>> {
+    let status = get_container_status(container_name);
+
+    let mut binding = Command::new("docker");
+    let cmd = binding.args(&["stats", "--no-stream", "format"]);
+    let cpu_str = if status == "running" {
+        std::str::from_utf8(&cmd.args(["{{.CPUPerc}}"]).output()?.stdout)?.trim().to_owned()
+    } else {
+        "0%".to_string()
+    };
+
+    let cpu_percent = cpu_str.trim_end_matches("%").parse::<usize>().unwrap_or(0);
+
+    println!("CPU PERCENT {}", cpu_percent);
+    let memory_percent: usize = if status == "running" { 2 } else { 0 };
+    let memory_usage: String = if status == "running" {
+        String::from("eqweqwe")
+    } else {
+        String::from("")
+    };
+
+    Ok(ContainerHealth {
+        name: container_name.to_string(),
+        status,
+        cpu_percent,
+        memory_usage: "".to_string(),
+        memory_percent: 12,
+    })
+}
+
+fn get_container_status(container_name: &str) -> String {
     let status_output = Command::new("docker")
-        .args(&["inspect", name, "--format", "{{.State.Status}}"])
+        .args(&["inspect", container_name, "--format", "{{.State.Status}}"])
         .output()
         .expect("msg");
 
