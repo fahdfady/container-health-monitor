@@ -1,0 +1,8 @@
+[package]
+name = "container-health-monitor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+color-print = "0.3.7"
+redis = "0.32.2"
