@@ -3,10 +3,29 @@ use std::process::Command;
 
 use color_print::cprintln;
 use redis::{self, Client, Commands};
+use sqlite;
+
+enum HealthStatus {
+    Healthy,
+    Unhealthy,
+    // add inactive status like "stall" or something
+}
+
+impl fmt::Display for HealthStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            HealthStatus::Healthy => "💚 Healthy",
+            HealthStatus::Unhealthy => "🔴 Unhealthy",
+        };
+
+        write!(f, "{text}")
+    }
+}
 
 struct ContainerHealth {
     name: String,
-    status: String,
+    status: HealthStatus,
+    container_status: String,
     cpu_percent: usize,
     memory_usage: String,
     memory_percent: usize,
@@ -14,7 +33,7 @@ struct ContainerHealth {
 
 impl fmt::Display for ContainerHealth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let status_emoji: &str = match self.status.as_str() {
+        let status_emoji: &str = match self.container_status.as_str() {
             "running" => "🟢",
             "exited" => "🔴",
             _ => "⚪",
@@ -25,7 +44,7 @@ impl fmt::Display for ContainerHealth {
             "{} {} {} | CPU: {:.1}% | Mem: {} ({:.1}%)",
             status_emoji,
             self.name,
-            self.status,
+            self.container_status,
             self.cpu_percent,
             self.memory_usage,
             self.memory_percent
@@ -35,11 +54,10 @@ impl fmt::Display for ContainerHealth {
 
 impl ContainerHealth {
     fn health_data(&self) -> String {
-        // ? should this return &str instead?
         format!(
-            "{{name:{}, status:{}, cpu_percentage:{}, memory_usage:{}, memory_percentage:{}, snapshot_took_at:{}}}",
+            "{{name:{}, container_status:{}, cpu_percentage:{}, memory_usage:{}, memory_percentage:{}, snapshot_took_at:{}}}",
             self.name,
-            self.status,
+            self.container_status,
             self.cpu_percent,
             self.memory_usage,
             self.memory_percent,
@@ -59,7 +77,8 @@ fn main() -> redis::RedisResult<()> {
 
     let container = ContainerHealth {
         name: String::from("sad_pare"),
-        status: String::from("running"),
+        status: HealthStatus::Healthy,
+        container_status: String::from("running"),
         cpu_percent: 10,
         memory_usage: String::from("200 MB"),
         memory_percent: 6,
@@ -96,12 +115,13 @@ fn get_containers_health() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn container_stats(container_name: &str) -> Result<ContainerHealth, Box<dyn std::error::Error>> {
-    let status = get_container_status(container_name);
+    let container_status = get_container_status(container_name);
 
-    if status != "running" {
+    if container_status != "running" {
         return Ok(ContainerHealth {
             name: container_name.to_string(),
-            status,
+            status: HealthStatus::Healthy,
+            container_status,
             cpu_percent: 0,
             memory_usage: "0B".to_string(),
             memory_percent: 0,
@@ -122,7 +142,8 @@ fn container_stats(container_name: &str) -> Result<ContainerHealth, Box<dyn std:
 
     Ok(ContainerHealth {
         name: container_name.to_string(),
-        status,
+        status: HealthStatus::Healthy,
+        container_status,
         cpu_percent,
         memory_usage: "".to_string(),
         memory_percent: 12,
@@ -139,4 +160,12 @@ fn get_container_status(container_name: &str) -> String {
         .unwrap()
         .trim()
         .to_string()
+}
+
+fn get_health(container: &str) -> HealthStatus {
+    match container {
+        "" => HealthStatus::Healthy,
+        "weqwe" => HealthStatus::Unhealthy,
+        _ => HealthStatus::Unhealthy,
+    }
 }
