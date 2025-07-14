@@ -66,10 +66,18 @@ impl ContainerHealth {
     }
 }
 
-fn main() -> redis::RedisResult<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🐳 Welcome to Docker Container Health Monitor!");
 
     cprintln!("connecting to redis..");
+
+    let sqlite_client = sqlite::open("db/monitor.db").unwrap();
+    let query = "
+        create table if not exists containers (name text, container_status text);
+        insert into containers values ('sad_pare', 'running');
+    ";
+    sqlite_client.execute(query).unwrap();
+
     let redis_client = Client::open("redis://127.0.0.1/")?;
     let mut conn = redis_client.get_connection()?;
     cprintln!("<green>Redis Server Connected</green>");
