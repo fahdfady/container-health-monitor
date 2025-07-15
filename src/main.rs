@@ -1,9 +1,16 @@
 use std::fmt;
 use std::process::Command;
 
+use clap::Parser;
 use color_print::cprintln;
 use redis::{self, Client, Commands};
 use sqlite;
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct Cli {
+    #[arg(short, long)]
+    name: Option<String>,
+}
 
 enum HealthStatus {
     Healthy,
@@ -67,17 +74,27 @@ impl ContainerHealth {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+
+    // for _ in 0..args.count {
+    //     println!("Hello {}!", args.name);
+    // }
+
+    if let Some(name) = cli.name.as_deref() {
+        println!("container name {}", name);
+    }
+
     println!("🐳 Welcome to Docker Container Health Monitor!");
 
-    cprintln!("connecting to redis..");
-
-    let sqlite_client = sqlite::open("db/monitor.db").unwrap();
+    let sqlite_client =
+        sqlite::open("/home/fahdashour/container-health-monitor/db/monitor.db").unwrap();
     let query = "
-        create table if not exists containers (name text, container_status text);
-        insert into containers values ('sad_pare', 'running');
+    create table if not exists containers (name text, container_status text);
+    insert into containers values ('sad_pare', 'running');
     ";
     sqlite_client.execute(query).unwrap();
 
+    cprintln!("connecting to redis..");
     let redis_client = Client::open("redis://127.0.0.1/")?;
     let mut conn = redis_client.get_connection()?;
     cprintln!("<green>Redis Server Connected</green>");

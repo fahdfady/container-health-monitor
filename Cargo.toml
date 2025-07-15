@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 chrono = "0.4.41"
+clap = { version = "4.5.41", features = ["derive"] }
 color-print = "0.3.7"
 redis = "0.32.2"
 sqlite = "0.37.0"
+ 
