@@ -4,12 +4,12 @@ use std::process::Command;
 use clap::Parser;
 use color_print::cprintln;
 use redis::{self, Client, Commands};
-use sqlite;
+use sqlite::{self, BindableWithIndex, State};
 #[derive(Parser)]
-#[command(version, about, long_about = None)]
+#[command(version, about, long_about = None)] // Read from `Cargo.toml`
 struct Cli {
     #[arg(short, long)]
-    name: Option<String>,
+    name: Option<Vec<String>>,
 }
 
 enum HealthStatus {
@@ -80,19 +80,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     println!("Hello {}!", args.name);
     // }
 
-    if let Some(name) = cli.name.as_deref() {
-        println!("container name {}", name);
-    }
-
+    // let container_names = cli.name.as_deref().unwrap();
     println!("🐳 Welcome to Docker Container Health Monitor!");
 
-    let sqlite_client =
-        sqlite::open("/home/fahdashour/container-health-monitor/db/monitor.db").unwrap();
-    let query = "
-    create table if not exists containers (name text, container_status text);
-    insert into containers values ('sad_pare', 'running');
+    if let Some(container_names) = cli.name.as_deref() {
+        let sqlite =
+            sqlite::open("/home/fahdashour/container-health-monitor/db/monitor.db").unwrap();
+        let query = "
+    create table if not exists containers (name text unique, container_status text);
     ";
-    sqlite_client.execute(query).unwrap();
+        sqlite.execute(query).unwrap();
+
+        for name in container_names {
+            println!("container name: {name}");
+            let add_containers_query = "
+            insert into containers values (?, 'running');
+            ";
+            let mut statement = sqlite.prepare(add_containers_query).unwrap();
+            statement.bind((1, name.as_str())).unwrap();
+
+            while let Ok(State::Row) = statement.next() {
+                println!("name = {}", statement.read::<String, _>("name").unwrap());
+                println!(
+                    "container_status = {}",
+                    statement.read::<String, _>("container_status").unwrap()
+                );
+            }
+        }
+    }
 
     cprintln!("connecting to redis..");
     let redis_client = Client::open("redis://127.0.0.1/")?;
