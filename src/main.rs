@@ -4,7 +4,7 @@ use std::process::Command;
 use clap::Parser;
 use color_print::cprintln;
 use redis::{self, Client, Commands};
-use sqlite::{self, BindableWithIndex, State};
+use sqlite::{self, State};
 #[derive(Parser)]
 #[command(version, about, long_about = None)] // Read from `Cargo.toml`
 struct Cli {
@@ -87,14 +87,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sqlite =
             sqlite::open("/home/fahdashour/container-health-monitor/db/monitor.db").unwrap();
         let query = "
-    create table if not exists containers (name text unique, container_status text);
-    ";
+        create table if not exists containers (name text unique, container_status text);
+        ";
+
         sqlite.execute(query).unwrap();
 
         for name in container_names {
-            println!("container name: {name}");
             let add_containers_query = "
-            insert into containers values (?, 'running');
+            insert into containers values (?, 'running') returning *;
             ";
             let mut statement = sqlite.prepare(add_containers_query).unwrap();
             statement.bind((1, name.as_str())).unwrap();
@@ -109,35 +109,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let container_names = cli.name.unwrap();
+
     cprintln!("connecting to redis..");
     let redis_client = Client::open("redis://127.0.0.1/")?;
     let mut conn = redis_client.get_connection()?;
     cprintln!("<green>Redis Server Connected</green>");
     let _: () = conn.set("health_monitor:status", true)?;
 
-    let container = ContainerHealth {
-        name: String::from("sad_pare"),
-        status: HealthStatus::Healthy,
-        container_status: String::from("running"),
-        cpu_percent: 10,
-        memory_usage: String::from("200 MB"),
-        memory_percent: 6,
-    };
+    for container_name in container_names {
+        let container = ContainerHealth {
+            name: String::from("sad_pare"),
+            status: HealthStatus::Healthy,
+            container_status: String::from("running"),
+            cpu_percent: 10,
+            memory_usage: String::from("200 MB"),
+            memory_percent: 6,
+        };
 
-    let _: () = conn.set_ex(
-        format!("health-data:{}", container.name),
-        container.health_data(),
-        60,
-    )?;
+        let _: () = conn.set_ex(
+            format!("health-data:{}", container.name),
+            container.health_data(),
+            60,
+        )?;
 
-    println!("{}", container);
+        println!("{}", container);
 
-    get_containers_health().unwrap();
+        let containers = get_containers().unwrap();
 
+        let stateofcontainer = is_container_in_list(&container.name, containers);
+        println!("{stateofcontainer}");
+    }
     Ok(())
 }
 
-fn get_containers_health() -> Result<(), Box<dyn std::error::Error>> {
+fn get_containers() -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let ps_output = Command::new("docker")
         .args(&["ps", "-a", "--format", "{{.Names}}"])
         .output()?;
@@ -147,11 +153,29 @@ fn get_containers_health() -> Result<(), Box<dyn std::error::Error>> {
         .trim()
         .to_string();
 
-    let container_names: Vec<&str> = stdout.lines().filter(|line| !line.is_empty()).collect();
-    container_stats("redis")?;
-    println!("{:?}", container_names);
+    let container_names = stdout
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| line.to_string())
+        .collect();
 
-    Ok(())
+    container_stats("redis")?;
+    // println!("{:?}", container_names);
+
+    Ok(container_names)
+}
+
+/// takes a container name an validates if docker recognizes it
+fn is_container_in_list(container_name: &str, containers_list: Vec<String>) -> bool {
+    let mut stat: bool = false;
+
+    for name in containers_list {
+        if name == container_name {
+            stat = true;
+        }
+    }
+
+    stat
 }
 
 fn container_stats(container_name: &str) -> Result<ContainerHealth, Box<dyn std::error::Error>> {
