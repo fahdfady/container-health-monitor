@@ -4,7 +4,8 @@ use std::{fmt, str::from_utf8};
 use clap::Parser;
 use color_print::cprintln;
 use redis::{self, Client, Commands};
-use sqlite::{self, State};
+use sqlx::{Connection, SqliteConnection, query, sqlite};
+
 #[derive(Parser)]
 #[command(version, about, long_about = None)] // Read from `Cargo.toml`
 struct Cli {
@@ -12,6 +13,7 @@ struct Cli {
     name: Option<Vec<String>>,
 }
 
+#[derive(Clone)]
 enum HealthStatus {
     Healthy,
     Unhealthy,
@@ -29,7 +31,9 @@ impl fmt::Display for HealthStatus {
     }
 }
 
+#[derive(Clone)]
 struct ContainerHealth {
+    id: String,
     name: String,
     status: HealthStatus,
     container_status: String,
@@ -59,6 +63,20 @@ impl fmt::Display for ContainerHealth {
     }
 }
 
+impl Default for ContainerHealth {
+    fn default() -> Self {
+        Self {
+            id: "".to_string(),
+            name: "container".to_string(),
+            status: HealthStatus::Healthy,
+            container_status: "".to_string(),
+            cpu_percent: 0,
+            memory_usage: "0B".to_string(),
+            memory_percent: 0,
+        }
+    }
+}
+
 impl ContainerHealth {
     fn fmt_health_data(&self) -> String {
         format!(
@@ -72,7 +90,7 @@ impl ContainerHealth {
         )
     }
 
-    pub fn get_container_info(container_name: &str) -> Self {
+    pub fn new(container_name: &str) -> Self {
         let status_output = Command::new("docker")
             .args(&["inspect", container_name, "--format", "{{.State.Status}}"])
             .output()
@@ -82,6 +100,7 @@ impl ContainerHealth {
 
         if container_status != "running" {
             return Self {
+                id: "".to_string(),
                 name: container_name.to_string(),
                 status: HealthStatus::Healthy,
                 container_status,
@@ -94,6 +113,10 @@ impl ContainerHealth {
         let mut binding = Command::new("docker");
         let cmd = binding.args(&["stats", "--no-stream", "--format"]);
 
+        let id_str = from_utf8(&cmd.args(["{{.ID}}"]).output().unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
         let cpu_str = from_utf8(&cmd.args(["{{.CPUPerc}}"]).output().unwrap().stdout)
             .unwrap()
             .trim()
@@ -107,6 +130,7 @@ impl ContainerHealth {
             .trim()
             .to_owned();
 
+        let id = id_str;
         let cpu_percent = cpu_str.trim_end_matches("%").parse::<usize>().unwrap_or(0);
         let memory_percent = mem_perc_str
             .trim_end_matches("%")
@@ -115,8 +139,8 @@ impl ContainerHealth {
         let memory_usage = mem_str;
 
         let status = Self::get_health_status(container_name);
-
         Self {
+            id,
             name: container_name.to_string(),
             status,
             container_status,
@@ -126,17 +150,27 @@ impl ContainerHealth {
         }
     }
 
+    pub fn refresh(&mut self) {
+        *self = Self::new(&self.name);
+    }
+
     fn get_health_status(container_name: &str) -> HealthStatus {
         HealthStatus::Healthy
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     // for _ in 0..args.count {
     //     println!("Hello {}!", args.name);
     // }
+
+    // let pool = sqlite::SqlitePoolOptions::new()
+    //     .max_connections(5)
+    //     .connect("sqlite://db/monitor.db")
+    //     .await;
 
     // let container_names = cli.name.as_deref().unwrap();
     println!("🐳 Welcome to Docker Container Health Monitor!");
@@ -149,13 +183,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // database setup
-    let sqlite = sqlite::open("/home/fahdashour/container-health-monitor/db/monitor.db").unwrap();
-    let query = "
-        create table if not exists containers (id text unique, name text unique, container_status text, health text,);
-        ";
+    let mut sqlite = SqliteConnection::connect("sqlite://db/monitor.db").await?;
 
-    sqlite.execute(query).unwrap();
+    // database setup
+    let _setup_query = sqlx::query("
+        create table if not exists containers (id text unique, name text unique, container_status text, status text);
+        ").execute(&mut sqlite).await?;
+
+    // sqlite.execute(query).unwrap();
+
     cprintln!("connecting to redis..");
     let redis_client = Client::open("redis://127.0.0.1/")?;
     let mut conn = redis_client.get_connection()?;
@@ -172,20 +208,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if !state_of_container {
             eprintln!("container {name} not found on your machine");
         } else {
-            let add_containers_query = "
-            insert into containers values (?,?, 'running') returning *;
-            ";
-            let mut statement = sqlite.prepare(add_containers_query).unwrap();
-            statement.bind((1, name.as_str())).unwrap();
-
-            while let Ok(State::Row) = statement.next() {
-                println!("name = {}", statement.read::<String, _>("name").unwrap());
-                println!(
-                    "container_status = {}",
-                    statement.read::<String, _>("container_status").unwrap()
-                );
+            let container_info = ContainerHealth::new(&name);
+            {
+                let container_info = container_info.clone();
+                let _add_containers_query = sqlx::query(
+                    "
+                insert into containers values (?,?,?,?) returning *;
+                ",
+                )
+                .bind(container_info.id)
+                .bind(container_info.name)
+                .bind(container_info.container_status)
+                .bind(container_info.status.to_string())
+                .execute(&mut sqlite)
+                .await?;
             }
+
             let container = ContainerHealth {
+                id: container_info.id,
                 name: name,
                 status: HealthStatus::Healthy,
                 container_status: String::from("running"),
@@ -220,7 +260,7 @@ fn get_containers() -> Result<Vec<String>, Box<dyn std::error::Error>> {
         .map(|line| line.to_string())
         .collect();
 
-    container_stats("redis")?;
+    // container_stats("redis")?;
     // println!("{:?}", container_names);
 
     Ok(container_names)
@@ -237,49 +277,6 @@ fn is_container_in_list(container_name: &str, containers_list: Vec<String>) -> b
     }
 
     stat
-}
-
-fn container_stats(container_name: &str) -> Result<ContainerHealth, Box<dyn std::error::Error>> {
-    let container_status = get_container_status(container_name);
-
-    if container_status != "running" {
-        return Ok(ContainerHealth {
-            name: container_name.to_string(),
-            status: HealthStatus::Healthy,
-            container_status,
-            cpu_percent: 0,
-            memory_usage: "0B".to_string(),
-            memory_percent: 0,
-        });
-    }
-
-    let mut binding = Command::new("docker");
-    let cmd = binding.args(&["stats", "--no-stream", "--format"]);
-    let cpu_str = from_utf8(&cmd.args(["{{.CPUPerc}}"]).output()?.stdout)?
-        .trim()
-        .to_owned();
-    let mem_perc_str = from_utf8(&cmd.args(["{{.MemPerc}}"]).output()?.stdout)?
-        .trim()
-        .to_owned();
-    let mem_str = from_utf8(&cmd.args(["{{.MemUsage}}"]).output()?.stdout)?
-        .trim()
-        .to_owned();
-
-    let cpu_percent = cpu_str.trim_end_matches("%").parse::<usize>().unwrap_or(0);
-    let memory_percent = mem_perc_str
-        .trim_end_matches("%")
-        .parse::<usize>()
-        .unwrap_or(0);
-    let memory_usage = mem_str;
-
-    Ok(ContainerHealth {
-        name: container_name.to_string(),
-        status: HealthStatus::Healthy,
-        container_status,
-        cpu_percent,
-        memory_usage,
-        memory_percent,
-    })
 }
 
 fn get_container_status(container_name: &str) -> String {
