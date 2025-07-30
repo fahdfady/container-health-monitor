@@ -5,7 +5,9 @@ use clap::Parser;
 use color_print::cprintln;
 use redis::{self, Client, Commands, RedisResult};
 use serde::{Deserialize, Serialize};
-use sqlx::{Connection, SqliteConnection};
+use sqlx::pool::PoolConnection;
+use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::Sqlite;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)] // Read from `Cargo.toml`
@@ -190,22 +192,29 @@ impl ContainerHealth {
 
         Ok(())
     }
+
+    async fn store_in_db(&self, mut db_conn: PoolConnection<Sqlite>) -> Result<(), sqlx::Error> {
+        let _add_containers_query = sqlx::query(
+            "
+                insert or replace into containers values (?,?,?,?,?) returning *;
+                ",
+        )
+        .bind(&self.id)
+        .bind(&self.name)
+        .bind(&self.container_status)
+        .bind(self.status.to_string())
+        .bind(self.last_updated.to_string())
+        .execute(&mut db_conn.detach())
+        .await?;
+
+        Ok(())
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    // for _ in 0..args.count {
-    //     println!("Hello {}!", args.name);
-    // }
-
-    // let pool = sqlite::SqlitePoolOptions::new()
-    //     .max_connections(5)
-    //     .connect("sqlite://db/monitor.db")
-    //     .await;
-
-    // let container_names = cli.name.as_deref().unwrap();
     println!("🐳 Welcome to Docker Container Health Monitor!");
 
     let container_names = match cli.name {
@@ -215,11 +224,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
     };
+    let pool = SqlitePoolOptions::new()
+        .max_connections(5)
+        .min_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .connect("sqlite://db/monitor.db")
+        .await?;
 
-    let mut sqlite = SqliteConnection::connect("sqlite://db/monitor.db").await?;
+    let conn_1 = pool.clone().acquire().await?;
 
     // database setup
-    let setup_query = sqlx::query(
+    let _setup_query = sqlx::query(
         "
         create table if not exists containers (
             id text unique,
@@ -230,10 +245,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         ",
     )
-    .execute(&mut sqlite)
+    .execute(&mut conn_1.detach())
     .await?;
-
-    // sqlite.execute(query).unwrap();
 
     cprintln!("🔌 Connecting to Redis...");
     let redis_client = Client::open("redis://127.0.0.1/")?;
@@ -250,22 +263,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("container {name} not found on your machine");
         } else {
             let container_info = ContainerHealth::new(&name);
-            {
-                let container_info = container_info.clone();
-                let _add_containers_query = sqlx::query(
-                    "
-                insert or replace into containers values (?,?,?,?,?) returning *;
-                ",
-                )
-                .bind(container_info.id)
-                .bind(container_info.name)
-                .bind(container_info.container_status)
-                .bind(container_info.status.to_string())
-                .bind(container_info.last_updated.to_string())
-                .execute(&mut sqlite)
-                .await?;
-            }
+            let conn_2 = pool.acquire().await?;
 
+            container_info.store_in_db(conn_2).await?;
             container_info.store_in_cache(&mut redis_conn, cli.cache_ttl)?;
         }
     }
