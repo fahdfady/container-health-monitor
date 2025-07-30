@@ -1,13 +1,17 @@
 [package]
 name = "container-health-monitor"
-version = "0.1.0"
-edition = "2024"
+version = "0.1.1"
+edition = "2021"
+authors = ["Fahd Ashour <fahd.fady212@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/fahdfady/container-health-monitor"
 
 [dependencies]
 chrono = "0.4.41"
 clap = { version = "4.5.41", features = ["derive"] }
 color-print = "0.3.7"
 redis = "0.32.2"
-# sqlite = "0.37.0"
+serde = "1.0.219"
+serde_json = "1.0.141"
 sqlx = { version = "0.8.3", features = ["sqlite", "runtime-tokio", "chrono"] }
 tokio = { version = "1.46.1", features = ["full"] }

@@ -3,43 +3,48 @@ use std::{fmt, str::from_utf8};
 
 use clap::Parser;
 use color_print::cprintln;
-use redis::{self, Client, Commands};
-use sqlx::{Connection, SqliteConnection, query, sqlite};
+use redis::{self, Client, Commands, RedisResult};
+use serde::{Deserialize, Serialize};
+use sqlx::{Connection, SqliteConnection};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)] // Read from `Cargo.toml`
 struct Cli {
     #[arg(short, long)]
     name: Option<Vec<String>>,
+
+    #[arg(short, long)]
+    cache_ttl: u64, // cache time-to-live in seconds
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 enum HealthStatus {
     Healthy,
     Unhealthy,
-    // add inactive status like "stall" or something
+    Stall,
 }
 
 impl fmt::Display for HealthStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let text = match self {
-            HealthStatus::Healthy => "💚 Healthy",
-            HealthStatus::Unhealthy => "🔴 Unhealthy",
+            Self::Healthy => "💚 Healthy",
+            Self::Unhealthy => "🔴 Unhealthy",
+            Self::Stall => "⚫ Stall",
         };
 
         write!(f, "{text}")
     }
 }
-
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct ContainerHealth {
     id: String,
     name: String,
     status: HealthStatus,
     container_status: String,
-    cpu_percent: usize,
+    cpu_percent: f32,
     memory_usage: String,
-    memory_percent: usize,
+    memory_percent: f32,
+    last_updated: i64,
 }
 
 impl fmt::Display for ContainerHealth {
@@ -52,13 +57,14 @@ impl fmt::Display for ContainerHealth {
 
         write!(
             f,
-            "{} {} {} | CPU: {:.1}% | Mem: {} ({:.1}%)",
+            "{} {} {} | CPU: {:.1}% | Mem: {} ({:.1}%) | Updated: {}s ago",
             status_emoji,
             self.name,
             self.container_status,
             self.cpu_percent,
             self.memory_usage,
-            self.memory_percent
+            self.memory_percent,
+            chrono::Utc::now().timestamp() - self.last_updated // get difference
         )
     }
 }
@@ -70,9 +76,10 @@ impl Default for ContainerHealth {
             name: "container".to_string(),
             status: HealthStatus::Healthy,
             container_status: "".to_string(),
-            cpu_percent: 0,
+            cpu_percent: 0.0,
             memory_usage: "0B".to_string(),
-            memory_percent: 0,
+            memory_percent: 0.0,
+            last_updated: chrono::Utc::now().timestamp(),
         }
     }
 }
@@ -98,17 +105,7 @@ impl ContainerHealth {
 
         let container_status: String = from_utf8(&status_output.stdout).unwrap().trim().to_string();
 
-        if container_status != "running" {
-            return Self {
-                id: "".to_string(),
-                name: container_name.to_string(),
-                status: HealthStatus::Healthy,
-                container_status,
-                cpu_percent: 0,
-                memory_usage: "0B".to_string(),
-                memory_percent: 0,
-            };
-        }
+        if container_status != "running" {}
 
         let mut binding = Command::new("docker");
         let cmd = binding.args(&["stats", "--no-stream", "--format"]);
@@ -131,14 +128,15 @@ impl ContainerHealth {
             .to_owned();
 
         let id = id_str;
-        let cpu_percent = cpu_str.trim_end_matches("%").parse::<usize>().unwrap_or(0);
+        println!("{id}");
+        let cpu_percent = cpu_str.trim_end_matches("%").parse::<f32>().unwrap_or(0.0);
         let memory_percent = mem_perc_str
             .trim_end_matches("%")
-            .parse::<usize>()
-            .unwrap_or(0);
+            .parse::<f32>()
+            .unwrap_or(0.0);
         let memory_usage = mem_str;
 
-        let status = Self::get_health_status(container_name);
+        let status = Self::get_health_status(container_name, cpu_percent, memory_percent);
         Self {
             id,
             name: container_name.to_string(),
@@ -147,6 +145,7 @@ impl ContainerHealth {
             cpu_percent,
             memory_usage,
             memory_percent,
+            last_updated: chrono::Utc::now().timestamp(),
         }
     }
 
@@ -154,8 +153,42 @@ impl ContainerHealth {
         *self = Self::new(&self.name);
     }
 
-    fn get_health_status(container_name: &str) -> HealthStatus {
-        HealthStatus::Healthy
+    fn get_health_status(
+        container_status: &str,
+        cpu_percent: f32,
+        memory_percent: f32,
+    ) -> HealthStatus {
+        match container_status {
+            "running" => {
+                if cpu_percent > 80.0 || memory_percent > 80.0 {
+                    HealthStatus::Unhealthy
+                } else {
+                    HealthStatus::Healthy
+                }
+            }
+            "exited" | "dead" => HealthStatus::Unhealthy,
+            "paused" => HealthStatus::Stall,
+            _ => HealthStatus::Unhealthy,
+        }
+    }
+
+    // fn from_cache(cache_key: &str, redis_conn: &mut redis::Connection) -> RedisResult<Self> {
+    //     let json_data: String = redis_conn.get(cache_key)?;
+
+    //     let container_health: Self = serde_json::from_str(&json_data).unwrap();
+
+    //     Ok(container_health)
+    // }
+
+    fn store_in_cache(&self, redis_conn: &mut redis::Connection, ttl: u64) -> RedisResult<()> {
+        let json_data: String = serde_json::to_string(self).unwrap();
+        println!("{json_data}");
+
+        let cache_key = format!("health-data:{}", self.name);
+
+        let _: () = redis_conn.set_ex(cache_key, json_data, ttl)?;
+
+        Ok(())
     }
 }
 
@@ -178,7 +211,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let container_names = match cli.name {
         Some(names) if !names.is_empty() => names,
         _ => {
-            eprintln!("No container names provided. exiting.");
+            eprintln!("No container names provided. use --name <NAME> argument.");
             return Ok(());
         }
     };
@@ -186,20 +219,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sqlite = SqliteConnection::connect("sqlite://db/monitor.db").await?;
 
     // database setup
-    let _setup_query = sqlx::query("
-        create table if not exists containers (id text unique, name text unique, container_status text, status text);
-        ").execute(&mut sqlite).await?;
+    let setup_query = sqlx::query(
+        "
+        create table if not exists containers (
+            id text unique,
+            name text unique,
+            container_status text,
+            status text,
+            last_updated integer
+        );
+        ",
+    )
+    .execute(&mut sqlite)
+    .await?;
 
     // sqlite.execute(query).unwrap();
 
-    cprintln!("connecting to redis..");
+    cprintln!("🔌 Connecting to Redis...");
     let redis_client = Client::open("redis://127.0.0.1/")?;
-    let mut conn = redis_client.get_connection()?;
-    cprintln!("<green>Redis Server Connected</green>");
+    let mut redis_conn = redis_client.get_connection()?;
+    cprintln!("<green>✅ Redis connected!</green>");
 
-    for name in container_names.clone() {
-        let _: () = conn.set("health_monitor:status", true)?;
-
+    for name in &container_names {
         let containers = get_containers().unwrap();
 
         let state_of_container = is_container_in_list(&name, containers);
@@ -213,34 +254,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let container_info = container_info.clone();
                 let _add_containers_query = sqlx::query(
                     "
-                insert into containers values (?,?,?,?) returning *;
+                insert or replace into containers values (?,?,?,?,?) returning *;
                 ",
                 )
                 .bind(container_info.id)
                 .bind(container_info.name)
                 .bind(container_info.container_status)
                 .bind(container_info.status.to_string())
+                .bind(container_info.last_updated.to_string())
                 .execute(&mut sqlite)
                 .await?;
             }
 
-            let container = ContainerHealth {
-                id: container_info.id,
-                name: name,
-                status: HealthStatus::Healthy,
-                container_status: String::from("running"),
-                cpu_percent: 10,
-                memory_usage: String::from("200 MB"),
-                memory_percent: 6,
-            };
-
-            let _: () = conn.set_ex(
-                format!("health-data:{}", container.name),
-                container.fmt_health_data(),
-                60,
-            )?;
-
-            println!("{}", container);
+            container_info.store_in_cache(&mut redis_conn, cli.cache_ttl)?;
         }
     }
 
@@ -260,9 +286,6 @@ fn get_containers() -> Result<Vec<String>, Box<dyn std::error::Error>> {
         .map(|line| line.to_string())
         .collect();
 
-    // container_stats("redis")?;
-    // println!("{:?}", container_names);
-
     Ok(container_names)
 }
 
@@ -277,13 +300,4 @@ fn is_container_in_list(container_name: &str, containers_list: Vec<String>) -> b
     }
 
     stat
-}
-
-fn get_container_status(container_name: &str) -> String {
-    let status_output = Command::new("docker")
-        .args(&["inspect", container_name, "--format", "{{.State.Status}}"])
-        .output()
-        .expect("msg");
-
-    from_utf8(&status_output.stdout).unwrap().trim().to_string()
 }
