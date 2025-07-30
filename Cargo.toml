@@ -6,6 +6,10 @@ authors = ["Fahd Ashour <fahd.fady212@gmail.com>"]
 license = "MIT"
 repository = "https://github.com/fahdfady/container-health-monitor"
 
+[[bin]]
+name = "chm"
+path = "src/main.rs"
+
 [dependencies]
 chrono = "0.4.41"
 clap = { version = "4.5.41", features = ["derive"] }
