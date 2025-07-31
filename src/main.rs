@@ -25,12 +25,18 @@ enum CliCommands {
 
         #[arg(short, long, default_value_t = 60)]
         cache_ttl: u64, // cache time-to-live in seconds
+
+        #[arg(short, long, default_value_t = false)]
+        watch: bool,
     },
 
     /// monitor all container on the machine
     MonitorAll {
         #[arg(short, long, default_value_t = 60)]
         cache_ttl: u64, // cache time-to-live in seconds
+
+        #[arg(short, long, default_value_t = false)]
+        watch: bool,
     },
 }
 
@@ -104,7 +110,7 @@ impl Default for ContainerHealth {
 impl ContainerHealth {
     fn fmt_health_data(&self) -> String {
         format!(
-            "{{name:{}, container_status:{}, cpu_percentage:{}, memory_usage:{}, memory_percentage:{}, snapshot_took_at:{}}}",
+            "{{name:{} || container_status:{} || cpu_percentage:{} || memory_usage:{} || memory_percentage:{} || snapshot_took_at:{}}}",
             self.name,
             self.container_status,
             self.cpu_percent,
@@ -124,36 +130,68 @@ impl ContainerHealth {
 
         if container_status != "running" {}
 
-        let mut binding = Command::new("docker");
-        let cmd = binding.args(&["stats", "--no-stream", "--format"]);
+        let container_status: String = from_utf8(&status_output.stdout).unwrap().trim().to_string();
 
-        let id_str = from_utf8(&cmd.args(["{{.ID}}"]).output().unwrap().stdout)
+        let id_output = Command::new("docker")
+            .args(&[
+                "stats",
+                "--no-stream",
+                "--format",
+                "{{.ID}}",
+                container_name,
+            ])
+            .output()
+            .expect("Failed to get container ID");
+        let id = from_utf8(&id_output.stdout).unwrap().trim().to_string();
+
+        let cpu_output = Command::new("docker")
+            .args(&[
+                "stats",
+                "--no-stream",
+                "--format",
+                "{{.CPUPerc}}",
+                container_name,
+            ])
+            .output()
+            .expect("Failed to get CPU percentage");
+        let cpu_percent = from_utf8(&cpu_output.stdout)
             .unwrap()
             .trim()
-            .to_owned();
-        let cpu_str = from_utf8(&cmd.args(["{{.CPUPerc}}"]).output().unwrap().stdout)
-            .unwrap()
-            .trim()
-            .to_owned();
-        let mem_perc_str = from_utf8(&cmd.args(["{{.MemPerc}}"]).output().unwrap().stdout)
-            .unwrap()
-            .trim()
-            .to_owned();
-        let mem_str = from_utf8(&cmd.args(["{{.MemUsage}}"]).output().unwrap().stdout)
-            .unwrap()
-            .trim()
-            .to_owned();
-
-        let id = id_str;
-
-        let cpu_percent = cpu_str.trim_end_matches("%").parse::<f32>().unwrap_or(0.0);
-
-        let memory_percent = mem_perc_str
             .trim_end_matches("%")
             .parse::<f32>()
             .unwrap_or(0.0);
 
-        let memory_usage = mem_str;
+        let mem_perc_output = Command::new("docker")
+            .args(&[
+                "stats",
+                "--no-stream",
+                "--format",
+                "{{.MemPerc}}",
+                container_name,
+            ])
+            .output()
+            .expect("Failed to get memory percentage");
+        let memory_percent = from_utf8(&mem_perc_output.stdout)
+            .unwrap()
+            .trim()
+            .trim_end_matches("%")
+            .parse::<f32>()
+            .unwrap_or(0.0);
+
+        let mem_usage_output = Command::new("docker")
+            .args(&[
+                "stats",
+                "--no-stream",
+                "--format",
+                "{{.MemUsage}}",
+                container_name,
+            ])
+            .output()
+            .expect("Failed to get memory usage");
+        let memory_usage = from_utf8(&mem_usage_output.stdout)
+            .unwrap()
+            .trim()
+            .to_string();
 
         let status = Self::get_health_status(container_name, cpu_percent, memory_percent);
 
@@ -202,7 +240,6 @@ impl ContainerHealth {
 
     fn store_in_cache(&self, redis_conn: &mut redis::Connection, ttl: u64) -> RedisResult<()> {
         let json_data: String = serde_json::to_string(self).unwrap();
-        println!("{json_data}");
 
         let cache_key = format!("health-data:{}", self.name);
 
@@ -265,11 +302,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     cprintln!("<green>✅ Redis connected!</green>");
 
     match cli.command {
-        CliCommands::Monitor { name, cache_ttl } => {
+        CliCommands::Monitor {
+            name,
+            cache_ttl,
+            watch,
+        } => {
             let container_names = match name.clone() {
                 Some(names) if !names.is_empty() => names,
                 _ => {
-                    cprintln!("<red>✅ Redis connected!</red>");
+                    cprintln!("<red>no container names supplied. add names with argument --name <<NAME>></red>");
                     return Ok(());
                 }
             };
@@ -282,9 +323,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            monitor_containers(name.unwrap(), pool, redis_conn, cache_ttl).await?;
+            monitor_containers(name.unwrap(), pool, redis_conn, cache_ttl, watch).await?;
         }
-        CliCommands::MonitorAll { cache_ttl } => {
+        CliCommands::MonitorAll { cache_ttl, watch } => {
             let container_names = get_all_containers()?;
 
             if container_names.is_empty() {
@@ -292,7 +333,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
 
-            monitor_containers(container_names, pool, redis_conn, cache_ttl).await?;
+            monitor_containers(container_names, pool, redis_conn, cache_ttl, watch).await?;
         }
     }
 
@@ -304,13 +345,21 @@ async fn monitor_containers(
     pool: sqlx::Pool<Sqlite>,
     mut redis_conn: redis::Connection,
     cache_ttl: u64,
+    watch: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for name in &container_names {
-        let container_info = ContainerHealth::new(&name);
-        let conn_2 = pool.acquire().await?;
+    loop {
+        for name in &container_names {
+            let container_info = ContainerHealth::new(&name);
+            let conn_2 = pool.acquire().await?;
 
-        container_info.store_in_db(conn_2).await?;
-        container_info.store_in_cache(&mut redis_conn, cache_ttl)?;
+            container_info.store_in_db(conn_2).await?;
+            container_info.store_in_cache(&mut redis_conn, cache_ttl)?;
+
+            println!("{}", container_info.fmt_health_data());
+        }
+        if !watch {
+            break;
+        };
     }
 
     Ok(())
