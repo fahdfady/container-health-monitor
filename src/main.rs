@@ -1,7 +1,7 @@
 use std::process::Command;
 use std::{fmt, str::from_utf8};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use color_print::cprintln;
 use redis::{self, Client, Commands, RedisResult};
 use serde::{Deserialize, Serialize};
@@ -12,11 +12,26 @@ use sqlx::Sqlite;
 #[derive(Parser)]
 #[command(version, about, long_about = None)] // Read from `Cargo.toml`
 struct Cli {
-    #[arg(short, long)]
-    name: Option<Vec<String>>,
+    #[command(subcommand)]
+    command: CliCommands,
+}
 
-    #[arg(short, long)]
-    cache_ttl: u64, // cache time-to-live in seconds
+#[derive(Subcommand)]
+enum CliCommands {
+    /// monitor specific containers by passing their names
+    Monitor {
+        #[arg(short, long)]
+        name: Option<Vec<String>>,
+
+        #[arg(short, long, default_value_t = 60)]
+        cache_ttl: u64, // cache time-to-live in seconds
+    },
+
+    /// monitor all container on the machine
+    MonitorAll {
+        #[arg(short, long, default_value_t = 60)]
+        cache_ttl: u64, // cache time-to-live in seconds
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -130,15 +145,18 @@ impl ContainerHealth {
             .to_owned();
 
         let id = id_str;
-        println!("{id}");
+
         let cpu_percent = cpu_str.trim_end_matches("%").parse::<f32>().unwrap_or(0.0);
+
         let memory_percent = mem_perc_str
             .trim_end_matches("%")
             .parse::<f32>()
             .unwrap_or(0.0);
+
         let memory_usage = mem_str;
 
         let status = Self::get_health_status(container_name, cpu_percent, memory_percent);
+
         Self {
             id,
             name: container_name.to_string(),
@@ -193,7 +211,7 @@ impl ContainerHealth {
         Ok(())
     }
 
-    async fn store_in_db(&self, mut db_conn: PoolConnection<Sqlite>) -> Result<(), sqlx::Error> {
+    async fn store_in_db(&self, pool_conn: PoolConnection<Sqlite>) -> Result<(), sqlx::Error> {
         let _add_containers_query = sqlx::query(
             "
                 insert or replace into containers values (?,?,?,?,?) returning *;
@@ -204,7 +222,7 @@ impl ContainerHealth {
         .bind(&self.container_status)
         .bind(self.status.to_string())
         .bind(self.last_updated.to_string())
-        .execute(&mut db_conn.detach())
+        .execute(&mut pool_conn.detach())
         .await?;
 
         Ok(())
@@ -217,13 +235,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("🐳 Welcome to Docker Container Health Monitor!");
 
-    let container_names = match cli.name {
-        Some(names) if !names.is_empty() => names,
-        _ => {
-            eprintln!("No container names provided. use --name <NAME> argument.");
-            return Ok(());
-        }
-    };
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
         .min_connections(1)
@@ -250,30 +261,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     cprintln!("🔌 Connecting to Redis...");
     let redis_client = Client::open("redis://127.0.0.1/")?;
-    let mut redis_conn = redis_client.get_connection()?;
+    let redis_conn = redis_client.get_connection()?;
     cprintln!("<green>✅ Redis connected!</green>");
 
-    for name in &container_names {
-        let containers = get_containers().unwrap();
+    match cli.command {
+        CliCommands::Monitor { name, cache_ttl } => {
+            let container_names = match name.clone() {
+                Some(names) if !names.is_empty() => names,
+                _ => {
+                    cprintln!("<red>✅ Redis connected!</red>");
+                    return Ok(());
+                }
+            };
 
-        let state_of_container = is_container_in_list(&name, containers);
-        println!("container {name}: {state_of_container}");
+            for name in &container_names {
+                let state_of_container = is_container_in_list(&name);
+                if !state_of_container {
+                    eprintln!("container {name} not found on your machine");
+                } else {
+                }
+            }
 
-        if !state_of_container {
-            eprintln!("container {name} not found on your machine");
-        } else {
-            let container_info = ContainerHealth::new(&name);
-            let conn_2 = pool.acquire().await?;
+            monitor_containers(name.unwrap(), pool, redis_conn, cache_ttl).await?;
+        }
+        CliCommands::MonitorAll { cache_ttl } => {
+            let container_names = get_all_containers()?;
 
-            container_info.store_in_db(conn_2).await?;
-            container_info.store_in_cache(&mut redis_conn, cli.cache_ttl)?;
+            if container_names.is_empty() {
+                cprintln!("<yellow>No containers found on your machine.</yellow>");
+                return Ok(());
+            }
+
+            monitor_containers(container_names, pool, redis_conn, cache_ttl).await?;
         }
     }
 
     Ok(())
 }
 
-fn get_containers() -> Result<Vec<String>, Box<dyn std::error::Error>> {
+async fn monitor_containers(
+    container_names: Vec<String>,
+    pool: sqlx::Pool<Sqlite>,
+    mut redis_conn: redis::Connection,
+    cache_ttl: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for name in &container_names {
+        let container_info = ContainerHealth::new(&name);
+        let conn_2 = pool.acquire().await?;
+
+        container_info.store_in_db(conn_2).await?;
+        container_info.store_in_cache(&mut redis_conn, cache_ttl)?;
+    }
+
+    Ok(())
+}
+
+fn get_all_containers() -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let ps_output = Command::new("docker")
         .args(&["ps", "-a", "--format", "{{.Names}}"])
         .output()?;
@@ -290,10 +333,10 @@ fn get_containers() -> Result<Vec<String>, Box<dyn std::error::Error>> {
 }
 
 /// takes a container name an validates if docker recognizes it
-fn is_container_in_list(container_name: &str, containers_list: Vec<String>) -> bool {
+fn is_container_in_list(container_name: &str) -> bool {
     let mut stat: bool = false;
 
-    for name in containers_list {
+    for name in get_all_containers().unwrap() {
         if name == container_name {
             stat = true;
         }
