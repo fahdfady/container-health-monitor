@@ -5,8 +5,8 @@ use clap::{Parser, Subcommand};
 use color_print::cprintln;
 use redis::{self, Client, Commands, RedisResult};
 use serde::{Deserialize, Serialize};
+use sqlx::migrate::MigrateDatabase;
 use sqlx::pool::PoolConnection;
-use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::Sqlite;
 
 #[derive(Parser)]
@@ -132,66 +132,32 @@ impl ContainerHealth {
 
         let container_status: String = from_utf8(&status_output.stdout).unwrap().trim().to_string();
 
-        let id_output = Command::new("docker")
+        // tod: convert all `docker stats` commands into one command, split it with `/t`, collect it, each line represents something we want.
+        //  docker stats --no-stream --format "{{.ID}}\t{{.CPUPerc}}\t{{.MemPerc}}\t{{.MemUsage}}"
+        let stats_output = Command::new("docker")
             .args(&[
                 "stats",
                 "--no-stream",
                 "--format",
-                "{{.ID}}",
+                "\"{{.ID}}\t{{.CPUPerc}}\t{{.MemPerc}}\t{{.MemUsage}}\"",
                 container_name,
             ])
             .output()
-            .expect("Failed to get container ID");
-        let id = from_utf8(&id_output.stdout).unwrap().trim().to_string();
+            .expect("Failed to get container stats");
 
-        let cpu_output = Command::new("docker")
-            .args(&[
-                "stats",
-                "--no-stream",
-                "--format",
-                "{{.CPUPerc}}",
-                container_name,
-            ])
-            .output()
-            .expect("Failed to get CPU percentage");
-        let cpu_percent = from_utf8(&cpu_output.stdout)
+        let stats = from_utf8(&stats_output.stdout)
             .unwrap()
             .trim()
-            .trim_end_matches("%")
-            .parse::<f32>()
-            .unwrap_or(0.0);
+            .split("\t")
+            .collect::<Vec<&str>>();
 
-        let mem_perc_output = Command::new("docker")
-            .args(&[
-                "stats",
-                "--no-stream",
-                "--format",
-                "{{.MemPerc}}",
-                container_name,
-            ])
-            .output()
-            .expect("Failed to get memory percentage");
-        let memory_percent = from_utf8(&mem_perc_output.stdout)
-            .unwrap()
-            .trim()
-            .trim_end_matches("%")
-            .parse::<f32>()
-            .unwrap_or(0.0);
+        let id = stats.get(0).unwrap_or(&"").to_string();
 
-        let mem_usage_output = Command::new("docker")
-            .args(&[
-                "stats",
-                "--no-stream",
-                "--format",
-                "{{.MemUsage}}",
-                container_name,
-            ])
-            .output()
-            .expect("Failed to get memory usage");
-        let memory_usage = from_utf8(&mem_usage_output.stdout)
-            .unwrap()
-            .trim()
-            .to_string();
+        let cpu_percent = stats.get(1).unwrap_or(&"0%").parse::<f32>().unwrap_or(0.0);
+
+        let memory_percent = stats.get(2).unwrap_or(&"0%").parse::<f32>().unwrap_or(0.0);
+
+        let memory_usage = stats.get(3).unwrap_or(&"0B").to_string();
 
         let status = Self::get_health_status(container_name, cpu_percent, memory_percent);
 
@@ -272,12 +238,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("🐳 Welcome to Docker Container Health Monitor!");
 
-    let pool = SqlitePoolOptions::new()
-        .max_connections(5)
-        .min_connections(1)
-        .acquire_timeout(std::time::Duration::from_secs(5))
-        .connect("sqlite://db/monitor.db")
-        .await?;
+    let pool = setup_sqlite_db().await;
 
     let conn_1 = pool.clone().acquire().await?;
 
@@ -360,6 +321,8 @@ async fn monitor_containers(
         if !watch {
             break;
         };
+
+        // todo: add waiting 5 seconds for each watch
     }
 
     Ok(())
@@ -392,4 +355,25 @@ fn is_container_in_list(container_name: &str) -> bool {
     }
 
     stat
+}
+
+async fn setup_sqlite_db() -> sqlx::Pool<Sqlite> {
+    use sqlx::{sqlite::SqlitePoolOptions, Sqlite};
+
+    let db_path = std::path::Path::new("./data/monitor.db");
+
+    if Sqlite::database_exists(db_path.to_str().unwrap())
+        .await
+        .unwrap()
+    {
+        Sqlite::create_database(db_path.to_str().unwrap())
+            .await
+            .unwrap()
+    }
+
+    SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect(&format!("sqlite://{}", db_path.display()))
+        .await
+        .unwrap()
 }
