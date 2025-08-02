@@ -41,6 +41,35 @@ enum CliCommands {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+enum ContainerState {
+    Created,
+    Running,
+    Paused,
+    Restarting,
+    Exited,
+    Stopped,
+    Removing,
+    Dead,
+}
+
+impl fmt::Display for ContainerState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            Self::Created => "created",
+            Self::Running => "running",
+            Self::Paused => "paused",
+            Self::Restarting => "restarting",
+            Self::Exited => "exited",
+            Self::Stopped => "stopped",
+            Self::Removing => "removing",
+            Self::Dead => "dead",
+        };
+
+        write!(f, "{text}")
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 enum HealthStatus {
     Healthy,
     Unhealthy,
@@ -58,12 +87,14 @@ impl fmt::Display for HealthStatus {
         write!(f, "{text}")
     }
 }
+
 #[derive(Clone, Serialize, Deserialize)]
 struct ContainerHealth {
     id: String,
     name: String,
     status: HealthStatus,
-    container_status: String,
+    container_state: ContainerState,
+    restart_count: u32,
     cpu_percent: f32,
     memory_usage: String,
     memory_percent: f32,
@@ -72,9 +103,11 @@ struct ContainerHealth {
 
 impl fmt::Display for ContainerHealth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let status_emoji: &str = match self.container_status.as_str() {
-            "running" => "🟢",
-            "exited" => "🔴",
+        let status_emoji: &str = match self.container_state {
+            ContainerState::Running => "🟢",
+            ContainerState::Exited => "🔴",
+            ContainerState::Paused => "🟡",
+            ContainerState::Restarting => "🔁",
             _ => "⚪",
         };
 
@@ -83,7 +116,7 @@ impl fmt::Display for ContainerHealth {
             "{} {} {} | CPU: {:.1}% | Mem: {} ({:.1}%) | Updated: {}s ago",
             status_emoji,
             self.name,
-            self.container_status,
+            self.container_state,
             self.cpu_percent,
             self.memory_usage,
             self.memory_percent,
@@ -98,7 +131,9 @@ impl Default for ContainerHealth {
             id: "".to_string(),
             name: "container".to_string(),
             status: HealthStatus::Healthy,
-            container_status: "".to_string(),
+            // need to revise what is the default State.Status of a container
+            container_state: ContainerState::Exited,
+            restart_count: 0,
             cpu_percent: 0.0,
             memory_usage: "0B".to_string(),
             memory_percent: 0.0,
@@ -110,9 +145,10 @@ impl Default for ContainerHealth {
 impl ContainerHealth {
     fn fmt_health_data(&self) -> String {
         format!(
-            "{{name:{} || container_status:{} || cpu_percentage:{} || memory_usage:{} || memory_percentage:{} || snapshot_took_at:{}}}",
+            "{{name:{} || container_state:{} || restart_count: {} || cpu_percentage:{} || memory_usage:{} || memory_percentage:{} || snapshot_took_at:{}}}",
             self.name,
-            self.container_status,
+            self.container_state,
+            self.restart_count,
             self.cpu_percent,
             self.memory_usage,
             self.memory_percent,
@@ -121,25 +157,44 @@ impl ContainerHealth {
     }
 
     pub fn new(container_name: &str) -> Self {
-        let status_output = Command::new("docker")
-            .args(&["inspect", container_name, "--format", "{{.State.Status}}"])
+        // runs command `docker inspect --format "{{.State.Status}}\t{{.RestartCount}}" <CONTAINER_NAME>`
+        let inspect_output = Command::new("docker")
+            .args(&[
+                "inspect",
+                "--format",
+                "{{.State.Status}}\t{{.RestartCount}}",
+                container_name,
+            ])
             .output()
-            .expect("msg");
+            .expect("Failed to inspect container");
 
-        let container_status: String = from_utf8(&status_output.stdout).unwrap().trim().to_string();
+        let inspects = from_utf8(&inspect_output.stdout)
+            .expect("Failed to get container status")
+            .trim()
+            .split("\t")
+            .collect::<Vec<&str>>();
 
-        if container_status != "running" {}
+        let container_state_string: String = inspects.get(0).unwrap().to_string();
 
-        let container_status: String = from_utf8(&status_output.stdout).unwrap().trim().to_string();
+        if container_state_string != "running" {}
+
+        let container_state = match container_state_string.as_str() {
+            "running" => ContainerState::Running,
+            "restarting" => ContainerState::Restarting,
+            "paused" => ContainerState::Paused,
+            _ => ContainerState::Exited,
+        };
+
+        let restart_count: u32 = inspects.get(1).unwrap_or(&"0").parse::<u32>().unwrap_or(0);
 
         // tod: convert all `docker stats` commands into one command, split it with `/t`, collect it, each line represents something we want.
-        //  docker stats --no-stream --format "{{.ID}}\t{{.CPUPerc}}\t{{.MemPerc}}\t{{.MemUsage}}"
+        // runs command `docker stats --no-stream --format "{{.ID}}\t{{.CPUPerc}}\t{{.MemPerc}}\t{{.MemUsage}}" <CONTAINER_NAME>`
         let stats_output = Command::new("docker")
             .args(&[
                 "stats",
                 "--no-stream",
                 "--format",
-                "\"{{.ID}}\t{{.CPUPerc}}\t{{.MemPerc}}\t{{.MemUsage}}\"",
+                "{{.ID}}\t{{.CPUPerc}}\t{{.MemPerc}}\t{{.MemUsage}}",
                 container_name,
             ])
             .output()
@@ -159,13 +214,15 @@ impl ContainerHealth {
 
         let memory_usage = stats.get(3).unwrap_or(&"0B").to_string();
 
-        let status = Self::get_health_status(container_name, cpu_percent, memory_percent);
+        let status =
+            Self::get_health_status(container_name, cpu_percent, memory_percent, restart_count);
 
         Self {
             id,
             name: container_name.to_string(),
             status,
-            container_status,
+            container_state,
+            restart_count,
             cpu_percent,
             memory_usage,
             memory_percent,
@@ -178,13 +235,14 @@ impl ContainerHealth {
     }
 
     fn get_health_status(
-        container_status: &str,
+        container_state: &str,
         cpu_percent: f32,
         memory_percent: f32,
+        restart_count: u32,
     ) -> HealthStatus {
-        match container_status {
+        match container_state {
             "running" => {
-                if cpu_percent > 80.0 || memory_percent > 80.0 {
+                if restart_count > 5 || cpu_percent > 80.0 || memory_percent > 80.0 {
                     HealthStatus::Unhealthy
                 } else {
                     HealthStatus::Healthy
@@ -222,7 +280,7 @@ impl ContainerHealth {
         )
         .bind(&self.id)
         .bind(&self.name)
-        .bind(&self.container_status)
+        .bind(&self.container_state.to_string())
         .bind(self.status.to_string())
         .bind(self.last_updated.to_string())
         .execute(&mut pool_conn.detach())
@@ -248,7 +306,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         create table if not exists containers (
             id text unique,
             name text unique,
-            container_status text,
+            container_state text,
             status text,
             last_updated integer
         );
@@ -359,21 +417,22 @@ fn is_container_in_list(container_name: &str) -> bool {
 
 async fn setup_sqlite_db() -> sqlx::Pool<Sqlite> {
     use sqlx::{sqlite::SqlitePoolOptions, Sqlite};
+    std::fs::create_dir_all("./data").unwrap();
 
     let db_path = std::path::Path::new("./data/monitor.db");
 
-    if Sqlite::database_exists(db_path.to_str().unwrap())
+    if !Sqlite::database_exists(db_path.to_str().unwrap())
         .await
         .unwrap()
     {
         Sqlite::create_database(db_path.to_str().unwrap())
             .await
-            .unwrap()
+            .unwrap();
     }
 
     SqlitePoolOptions::new()
         .max_connections(5)
-        .connect(&format!("sqlite://{}", db_path.display()))
+        .connect(&format!("sqlite://{}", db_path.to_str().unwrap()))
         .await
         .unwrap()
 }
