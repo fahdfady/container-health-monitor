@@ -7,7 +7,7 @@
 - [ ] feat: make an alert system
     - eg. alert if container restarted (via daemon) 3 times
 - [x] format container health data to something like tables
-- [ ] add a container history table in sqlite
+- [x] add a container history table in sqlite
     - this will help us track the history of tables, not just the current state, to make dashboards and insights of our containers
 - [ ] utilize redis caching to retrive current info of a container faster
 - [ ] consider using [bollard](https://docs.rs/bollard/latest/bollard/)

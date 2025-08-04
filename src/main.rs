@@ -101,6 +101,7 @@ struct ContainerHealth {
     cpu_percent: f32,
     memory_usage: String,
     memory_percent: f32,
+    uptime: String,
     last_updated: i64,
 }
 
@@ -116,7 +117,7 @@ impl fmt::Display for ContainerHealth {
 
         write!(
             f,
-            "{} {} {} | CPU: {:.1}% | Mem: {} ({:.1}%) | Restarts: {} | Updated: {}s ago",
+            "{} {} {} | CPU: {:.1}% | Mem: {} ({:.1}%) | Restarts: {} | Uptime: {} | Updated: {}s ago",
             status_emoji,
             self.name,
             self.status,
@@ -124,6 +125,7 @@ impl fmt::Display for ContainerHealth {
             self.memory_usage,
             self.memory_percent,
             self.restart_count,
+            self.uptime,
             chrono::Utc::now().timestamp() - self.last_updated
         )
     }
@@ -141,6 +143,7 @@ impl Default for ContainerHealth {
             cpu_percent: 0.0,
             memory_usage: "0B".to_string(),
             memory_percent: 0.0,
+            uptime: "".to_string(),
             last_updated: chrono::Utc::now().timestamp(),
         }
     }
@@ -148,12 +151,12 @@ impl Default for ContainerHealth {
 
 impl ContainerHealth {
     pub fn new(container_name: &str) -> Self {
-        // runs command `docker inspect --format "{{.State.Status}}\t{{.RestartCount}}" <CONTAINER_NAME>`
+        // runs command `docker inspect --format "{{.State.Status}}\t{{.State.StartedAt}}\t{{.RestartCount}}" <CONTAINER_NAME>`
         let inspect_output = Command::new("docker")
             .args([
                 "inspect",
                 "--format",
-                "{{.State.Status}}\t{{.RestartCount}}",
+                "{{.State.Status}}\t{{.State.StartedAt}}\t{{.RestartCount}}",
                 container_name,
             ])
             .output()
@@ -176,7 +179,12 @@ impl ContainerHealth {
             _ => ContainerState::Exited,
         };
 
-        let restart_count: u32 = inspects.get(1).unwrap_or(&"0").parse::<u32>().unwrap_or(0);
+        // maybe we need to rethink this, because State.StartedAt refers to the LAST time the container has started, we could deal with an exited container that has been last started in months and will give inacurate expectations about it being up since then. 
+        let started_at = inspects.get(1).unwrap();
+
+        let uptime = Self::calculate_uptime(started_at).unwrap();
+
+        let restart_count = inspects.get(2).unwrap_or(&"0").parse::<u32>().unwrap_or(0);
 
         // tod: convert all `docker stats` commands into one command, split it with `/t`, collect it, each line represents something we want.
         // runs command `docker stats --no-stream --format "{{.ID}}\t{{.CPUPerc}}\t{{.MemPerc}}\t{{.MemUsage}}" <CONTAINER_NAME>`
@@ -221,12 +229,32 @@ impl ContainerHealth {
             cpu_percent,
             memory_usage,
             memory_percent,
+            uptime,
             last_updated: chrono::Utc::now().timestamp(),
         }
     }
 
-    pub fn refresh(&mut self) {
-        *self = Self::new(&self.name);
+    // pub fn refresh(&mut self) {
+    //     *self = Self::new(&self.name);
+    // }
+
+    /// take start_time and minus the current timestamp from it, returning a formatted human-readble uptime
+    fn calculate_uptime(started_at: &str) -> Result<String, Box<dyn std::error::Error>> {
+        let start_time = chrono::DateTime::parse_from_rfc3339(started_at)?;
+        let now_time = chrono::Utc::now();
+        let duration = now_time.signed_duration_since(start_time);
+
+        let days = duration.num_days();
+        let hours = duration.num_hours() % 24;
+        let minutes = duration.num_minutes() % 60;
+
+        if days > 0 {
+            Ok(format!("{}d {}h {}m", days, hours, minutes))
+        } else if hours > 0 {
+            Ok(format!("{}h {}m", hours, minutes))
+        } else {
+            Ok(format!("{}m", minutes))
+        }
     }
 
     fn get_health_status(
@@ -283,6 +311,20 @@ impl ContainerHealth {
 
         Ok(())
     }
+
+    // async fn store_in_history_db(&self, pool_conn: PoolConnection<Sqlite>) -> Result<(), sqlx::Error> {
+    //     let _add_container_history_query = sqlx::query(
+    //         "
+    //             insert or replace into container_history values (?,?,?,?,?) returning *;
+    //             ",
+    //     )
+    //     .bind(&self.id)
+    //     .bind(&self.name)
+    //     .execute(&mut pool_conn.detach())
+    //     .await?;
+
+    //     Ok(())
+    // }
 }
 
 #[tokio::main]
