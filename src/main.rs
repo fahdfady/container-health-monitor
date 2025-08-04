@@ -38,6 +38,9 @@ enum CliCommands {
         #[arg(short, long, default_value_t = false)]
         watch: bool,
     },
+
+    /// simply wipe/delete the database file for users who want to start from a clean DB
+    Wipe,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -354,6 +357,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             monitor_containers(container_names, pool, redis_conn, cache_ttl, watch).await?;
+        }
+        CliCommands::Wipe => {
+            // delete the database file
+            let db_path = std::path::Path::new("./data/monitor.db");
+
+            // remove the db file, not the directory, user might have done something inside the dir and we don't want them to suffer.
+            std::fs::remove_file(db_path)?;
+
+            cprintln!("<green>🗑️  Successfully wiped all data</green>");
         }
     }
 

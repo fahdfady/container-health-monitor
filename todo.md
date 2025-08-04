@@ -9,6 +9,6 @@
 
 - [ ] special requests via cli
     - e.g if container restarted 3 times alert
-    - [ ] Add a `--reset` or `--wipe` CLI flag For devs or power users who want to start from a clean DB.
+    - [x] Add a `--wipe` CLI flag For devs or power users who want to start from a clean DB.
 
 
