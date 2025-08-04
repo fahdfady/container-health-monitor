@@ -36,7 +36,7 @@ enum CliCommands {
         cache_ttl: u64, // cache time-to-live in seconds
 
         #[arg(short, long, default_value_t = false)]
-        watch: bool,
+        watch: bool, // BUG: adding watch here, does not watch for newly created containers, only ones which existed when starting the CLI
     },
 
     /// simply wipe/delete the database file for users who want to start from a clean DB
@@ -293,23 +293,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pool = setup_sqlite_db().await;
 
-    let conn_1 = pool.clone().acquire().await?;
-
-    // database setup
-    let _setup_query = sqlx::query(
-        "
-        create table if not exists containers (
-            id text unique,
-            name text unique,
-            container_state text,
-            status text,
-            last_updated integer
-        );
-        ",
-    )
-    .execute(&mut conn_1.detach())
-    .await?;
-
     cprintln!("🔌 Connecting to Redis...");
     let redis_client = Client::open("redis://127.0.0.1/")?;
     let redis_conn = redis_client.get_connection()?;
@@ -436,9 +419,56 @@ async fn setup_sqlite_db() -> sqlx::Pool<Sqlite> {
             .unwrap();
     }
 
-    SqlitePoolOptions::new()
+    let pool = SqlitePoolOptions::new()
         .max_connections(5)
         .connect(&format!("sqlite://{}", db_path.to_str().unwrap()))
         .await
-        .unwrap()
+        .expect("failed to create sqlite connection pool");
+
+    let conn_1 = pool
+        .clone()
+        .acquire()
+        .await
+        .expect("failed to acquire connection pool");
+
+    let conn_2 = pool
+        .clone()
+        .acquire()
+        .await
+        .expect("failed to acquire connection pool");
+
+    // database setup
+    let _setup_containers_table_query = sqlx::query(
+        "
+        create table if not exists containers (
+            id text unique,
+            name text unique,
+            container_state text,
+            status text,
+            last_updated integer
+        );
+        ",
+    )
+    .execute(&mut conn_1.detach())
+    .await
+    .unwrap();
+    let _setup_container_history_table_query = sqlx::query(
+        "
+        create table if not exists container_history (
+            id text unique,
+            name text unique,
+            status text,
+            cpu_percent real,
+            memory_percent real,
+            restart_count text,
+            uptime text,
+            timestamp integer
+        );
+    ",
+    )
+    .execute(&mut conn_2.detach())
+    .await
+    .unwrap();
+
+    pool
 }
