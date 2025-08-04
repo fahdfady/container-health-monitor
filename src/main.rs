@@ -205,8 +205,12 @@ impl ContainerHealth {
 
         let memory_usage = stats.get(3).unwrap_or(&"0B").to_string();
 
-        let status =
-            Self::get_health_status(container_state.to_string().as_str(), cpu_percent, memory_percent, restart_count);
+        let status = Self::get_health_status(
+            container_state.to_string().as_str(),
+            cpu_percent,
+            memory_percent,
+            restart_count,
+        );
 
         Self {
             id,
@@ -381,7 +385,8 @@ async fn monitor_containers(
             break;
         };
 
-        // todo: add waiting 5 seconds for each watch
+        // add waiting 5 seconds for each watch (todo: review how many seconds might be appropiate)
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     }
 
     Ok(())
