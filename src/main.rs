@@ -159,7 +159,7 @@ impl ContainerHealth {
     pub fn new(container_name: &str) -> Self {
         // runs command `docker inspect --format "{{.State.Status}}\t{{.RestartCount}}" <CONTAINER_NAME>`
         let inspect_output = Command::new("docker")
-            .args(&[
+            .args([
                 "inspect",
                 "--format",
                 "{{.State.Status}}\t{{.RestartCount}}",
@@ -174,9 +174,9 @@ impl ContainerHealth {
             .split("\t")
             .collect::<Vec<&str>>();
 
-        let container_state_string: String = inspects.get(0).unwrap().to_string();
+        let container_state_string: String = inspects.first().unwrap().to_string();
 
-        if container_state_string != "running" {}
+        // if container_state_string != "running" {}
 
         let container_state = match container_state_string.as_str() {
             "running" => ContainerState::Running,
@@ -190,7 +190,7 @@ impl ContainerHealth {
         // tod: convert all `docker stats` commands into one command, split it with `/t`, collect it, each line represents something we want.
         // runs command `docker stats --no-stream --format "{{.ID}}\t{{.CPUPerc}}\t{{.MemPerc}}\t{{.MemUsage}}" <CONTAINER_NAME>`
         let stats_output = Command::new("docker")
-            .args(&[
+            .args([
                 "stats",
                 "--no-stream",
                 "--format",
@@ -206,7 +206,7 @@ impl ContainerHealth {
             .split("\t")
             .collect::<Vec<&str>>();
 
-        let id = stats.get(0).unwrap_or(&"").to_string();
+        let id = stats.first().unwrap_or(&"").to_string();
 
         let cpu_percent = stats.get(1).unwrap_or(&"0%").parse::<f32>().unwrap_or(0.0);
 
@@ -280,7 +280,7 @@ impl ContainerHealth {
         )
         .bind(&self.id)
         .bind(&self.name)
-        .bind(&self.container_state.to_string())
+        .bind(self.container_state.to_string())
         .bind(self.status.to_string())
         .bind(self.last_updated.to_string())
         .execute(&mut pool_conn.detach())
@@ -335,11 +335,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             for name in &container_names {
-                let state_of_container = is_container_in_list(&name);
+                let state_of_container = is_container_in_list(name);
                 if !state_of_container {
                     eprintln!("container {name} not found on your machine");
-                } else {
                 }
+                // else {
+                // }
             }
 
             monitor_containers(name.unwrap(), pool, redis_conn, cache_ttl, watch).await?;
@@ -368,7 +369,7 @@ async fn monitor_containers(
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         for name in &container_names {
-            let container_info = ContainerHealth::new(&name);
+            let container_info = ContainerHealth::new(name);
             let conn_2 = pool.acquire().await?;
 
             container_info.store_in_db(conn_2).await?;
@@ -388,7 +389,7 @@ async fn monitor_containers(
 
 fn get_all_containers() -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let ps_output = Command::new("docker")
-        .args(&["ps", "-a", "--format", "{{.Names}}"])
+        .args(["ps", "-a", "--format", "{{.Names}}"])
         .output()?;
 
     let stdout = from_utf8(&ps_output.stdout).unwrap().trim().to_string();
