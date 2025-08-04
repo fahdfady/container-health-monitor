@@ -147,19 +147,6 @@ impl Default for ContainerHealth {
 }
 
 impl ContainerHealth {
-    fn fmt_health_data(&self) -> String {
-        format!(
-            "{{name:{} || container_state:{} || restart_count: {} || cpu_percentage:{} || memory_usage:{} || memory_percentage:{} || snapshot_took_at:{}}}",
-            self.name,
-            self.container_state,
-            self.restart_count,
-            self.cpu_percent,
-            self.memory_usage,
-            self.memory_percent,
-            chrono::Utc::now().to_rfc3339()
-        )
-    }
-
     pub fn new(container_name: &str) -> Self {
         // runs command `docker inspect --format "{{.State.Status}}\t{{.RestartCount}}" <CONTAINER_NAME>`
         let inspect_output = Command::new("docker")
@@ -219,7 +206,7 @@ impl ContainerHealth {
         let memory_usage = stats.get(3).unwrap_or(&"0B").to_string();
 
         let status =
-            Self::get_health_status(container_name, cpu_percent, memory_percent, restart_count);
+            Self::get_health_status(container_state.to_string().as_str(), cpu_percent, memory_percent, restart_count);
 
         Self {
             id,
@@ -254,7 +241,7 @@ impl ContainerHealth {
             }
             "exited" | "dead" => HealthStatus::Unhealthy,
             "paused" => HealthStatus::Stall,
-            _ => HealthStatus::Unhealthy,
+            _ => HealthStatus::Stall,
         }
     }
 
