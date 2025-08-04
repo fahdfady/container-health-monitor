@@ -179,7 +179,7 @@ impl ContainerHealth {
             _ => ContainerState::Exited,
         };
 
-        // maybe we need to rethink this, because State.StartedAt refers to the LAST time the container has started, we could deal with an exited container that has been last started in months and will give inacurate expectations about it being up since then. 
+        // maybe we need to rethink this, because State.StartedAt refers to the LAST time the container has started, we could deal with an exited container that has been last started in months and will give inacurate expectations about it being up since then.
         let started_at = inspects.get(1).unwrap();
 
         let uptime = Self::calculate_uptime(started_at).unwrap();
@@ -249,11 +249,11 @@ impl ContainerHealth {
         let minutes = duration.num_minutes() % 60;
 
         if days > 0 {
-            Ok(format!("{}d {}h {}m", days, hours, minutes))
+            Ok(format!("{days}d {hours}h {minutes}m"))
         } else if hours > 0 {
-            Ok(format!("{}h {}m", hours, minutes))
+            Ok(format!("{hours}h {minutes}m"))
         } else {
-            Ok(format!("{}m", minutes))
+            Ok(format!("{minutes}m"))
         }
     }
 
