@@ -108,7 +108,7 @@ impl fmt::Display for ContainerHealth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let status_emoji: &str = match self.container_state {
             ContainerState::Running => "🟢",
-            ContainerState::Exited => "🔴",
+            ContainerState::Exited => "⭕",
             ContainerState::Paused => "🟡",
             ContainerState::Restarting => "🔁",
             _ => "⚪",
@@ -116,14 +116,15 @@ impl fmt::Display for ContainerHealth {
 
         write!(
             f,
-            "{} {} {} | CPU: {:.1}% | Mem: {} ({:.1}%) | Updated: {}s ago",
+            "{} {} {} | CPU: {:.1}% | Mem: {} ({:.1}%) | Restarts: {} | Updated: {}s ago",
             status_emoji,
             self.name,
-            self.container_state,
+            self.status,
             self.cpu_percent,
             self.memory_usage,
             self.memory_percent,
-            chrono::Utc::now().timestamp() - self.last_updated // get difference
+            self.restart_count,
+            chrono::Utc::now().timestamp() - self.last_updated
         )
     }
 }
@@ -381,13 +382,13 @@ async fn monitor_containers(
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         for name in &container_names {
-            let container_info = ContainerHealth::new(name);
+            let container_health_info = ContainerHealth::new(name);
             let conn_2 = pool.acquire().await?;
 
-            container_info.store_in_db(conn_2).await?;
-            container_info.store_in_cache(&mut redis_conn, cache_ttl)?;
+            container_health_info.store_in_db(conn_2).await?;
+            container_health_info.store_in_cache(&mut redis_conn, cache_ttl)?;
 
-            println!("{}", container_info.fmt_health_data());
+            println!("{container_health_info}");
         }
         if !watch {
             break;
