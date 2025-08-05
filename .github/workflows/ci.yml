@@ -47,4 +47,4 @@ jobs:
           components: rustfmt
 
       - name: check formatting
-        run: cargo +nightly fmt --all -- --checks
+        run: cargo +nightly fmt --all -- --check
