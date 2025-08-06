@@ -179,10 +179,9 @@ impl ContainerHealth {
             _ => ContainerState::Exited,
         };
 
-        // maybe we need to rethink this, because State.StartedAt refers to the LAST time the container has started, we could deal with an exited container that has been last started in months and will give inacurate expectations about it being up since then.
         let started_at = inspects.get(1).unwrap();
 
-        let uptime = Self::calculate_uptime(started_at).unwrap();
+        let uptime = Self::calculate_uptime(started_at, &container_state).unwrap();
 
         let restart_count = inspects.get(2).unwrap_or(&"0").parse::<u32>().unwrap_or(0);
 
@@ -239,21 +238,30 @@ impl ContainerHealth {
     // }
 
     /// take start_time and minus the current timestamp from it, returning a formatted human-readble uptime
-    fn calculate_uptime(started_at: &str) -> Result<String, Box<dyn std::error::Error>> {
-        let start_time = chrono::DateTime::parse_from_rfc3339(started_at)?;
-        let now_time = chrono::Utc::now();
-        let duration = now_time.signed_duration_since(start_time);
+    fn calculate_uptime(
+        started_at: &str,
+        container_status: &ContainerState,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        match container_status {
+            ContainerState::Exited => Ok("0m".to_string()),
+            ContainerState::Dead => Ok("0m".to_string()),
+            _ => {
+                let start_time = chrono::DateTime::parse_from_rfc3339(started_at)?;
+                let now_time = chrono::Utc::now();
+                let duration = now_time.signed_duration_since(start_time);
 
-        let days = duration.num_days();
-        let hours = duration.num_hours() % 24;
-        let minutes = duration.num_minutes() % 60;
+                let days = duration.num_days();
+                let hours = duration.num_hours() % 24;
+                let minutes = duration.num_minutes() % 60;
 
-        if days > 0 {
-            Ok(format!("{days}d {hours}h {minutes}m"))
-        } else if hours > 0 {
-            Ok(format!("{hours}h {minutes}m"))
-        } else {
-            Ok(format!("{minutes}m"))
+                if days > 0 {
+                    Ok(format!("{days}d {hours}h {minutes}m"))
+                } else if hours > 0 {
+                    Ok(format!("{hours}h {minutes}m"))
+                } else {
+                    Ok(format!("{minutes}m"))
+                }
+            }
         }
     }
 
