@@ -1,4 +1,3 @@
-use std::ops::Deref;
 use std::process::Command;
 use std::{fmt, str::from_utf8};
 
@@ -6,7 +5,7 @@ use bollard::models::{ContainerInspectResponse, ContainerState as BollardContain
 use bollard::Docker;
 use clap::{Parser, Subcommand};
 use color_print::cprintln;
-use futures_util::future::FutureExt;
+use futures_util::StreamExt;
 use redis::{self, Client, Commands, RedisResult};
 use serde::{Deserialize, Serialize};
 use sqlx::migrate::MigrateDatabase;
@@ -176,20 +175,10 @@ impl ContainerHealth {
         container_name: &str,
         docker: &Docker,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        // let inspect_options = docker
-        //     .inspect_container(
-        //         container_name,
-        //         Some(bollard::query_parameters::InspectContainerOptions { size: false }),
-        //     )
-        //     .await?;
-
         let inspect_options = bollard::query_parameters::InspectContainerOptions { size: false };
 
         let inspect_result: ContainerInspectResponse = docker
-            .inspect_container(
-                container_name,
-                Some(bollard::query_parameters::InspectContainerOptions { size: false }),
-            )
+            .inspect_container(container_name, Some(inspect_options))
             .await?;
 
         // if container_state_string != "running" {}
@@ -202,32 +191,22 @@ impl ContainerHealth {
 
         let restart_count = inspect_result.restart_count.unwrap();
 
-        // tod: convert all `docker stats` commands into one command, split it with `/t`, collect it, each line represents something we want.
-        // runs command `docker stats --no-stream --format "{{.ID}}\t{{.CPUPerc}}\t{{.MemPerc}}\t{{.MemUsage}}" <CONTAINER_NAME>`
-        let stats_output = Command::new("docker")
-            .args([
-                "stats",
-                "--no-stream",
-                "--format",
-                "{{.ID}}\t{{.CPUPerc}}\t{{.MemPerc}}\t{{.MemUsage}}",
-                container_name,
-            ])
-            .output()
-            .expect("Failed to get container stats");
+        let stats_options = bollard::query_parameters::StatsOptions {
+            one_shot: true,
+            stream: false,
+        };
 
-        let stats = from_utf8(&stats_output.stdout)
-            .unwrap()
-            .trim()
-            .split("\t")
-            .collect::<Vec<&str>>();
+        let stats_result = docker
+            .stats(container_name, Some(stats_options))
+            .into_future()
+            .await
+            .0
+            .unwrap()?;
 
-        let id = stats.first().unwrap_or(&"").to_string();
+        let id = stats_result.clone().id.unwrap();
 
-        let cpu_percent = stats.get(1).unwrap_or(&"0%").parse::<f32>().unwrap_or(0.0);
-
-        let memory_percent = stats.get(2).unwrap_or(&"0%").parse::<f32>().unwrap_or(0.0);
-
-        let memory_usage = stats.get(3).unwrap_or(&"0B").to_string();
+        let cpu_percent = Self::calculate_cpu_percent(&stats_result);
+        let (memory_usage, memory_percent) = Self::calculate_memory_stats(&stats_result);
 
         let status = Self::get_health_status(
             container_state.to_string().as_str(),
@@ -279,6 +258,62 @@ impl ContainerHealth {
                     Ok(format!("{minutes}m"))
                 }
             }
+        }
+    }
+
+    fn calculate_cpu_percent(stats: &bollard::models::ContainerStatsResponse) -> f32 {
+        let cpu_stats = stats.cpu_stats.as_ref().unwrap();
+        let precpu_stats = stats.precpu_stats.as_ref().unwrap();
+        let cpu_usage = cpu_stats.cpu_usage.as_ref().unwrap();
+        let precpu_usage = precpu_stats.cpu_usage.as_ref().unwrap();
+        let system_usage = cpu_stats.system_cpu_usage.unwrap();
+        let presystem_usage = precpu_stats.system_cpu_usage.unwrap();
+
+        let cpu_delta =
+            cpu_usage.total_usage.unwrap() as f64 - precpu_usage.total_usage.unwrap() as f64;
+        let system_delta = (system_usage - presystem_usage) as f64;
+        let number_cpus = cpu_usage
+            .percpu_usage
+            .as_ref()
+            .map(|v| v.len())
+            .unwrap_or(1) as f64;
+
+        if system_delta > 0.0 && cpu_delta > 0.0 {
+            ((cpu_delta / system_delta) * number_cpus * 100.0) as f32
+        } else {
+            0.0
+        }
+    }
+
+    fn calculate_memory_stats(stats: &bollard::models::ContainerStatsResponse) -> (String, f32) {
+        if let Some(memory_stats) = &stats.memory_stats {
+            let usage = memory_stats.usage.unwrap_or(0);
+            let limit = memory_stats.limit.unwrap_or(1);
+
+            let memory_usage = Self::format_bytes(usage);
+            let memory_percent: f32 = ((usage as f64 / limit as f64) * 100.0) as f32;
+
+            (memory_usage, memory_percent)
+        } else {
+            ("0B".to_string(), 0.0)
+        }
+    }
+
+    fn format_bytes(bytes: u64) -> String {
+        const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
+
+        let mut size = bytes as f64;
+        let mut unit_index = 0;
+
+        while size >= 1024.0 && unit_index < UNITS.len() - 1 {
+            size /= 1024.0;
+            unit_index += 1;
+        }
+
+        if unit_index == 0 {
+            format!("{}B", bytes)
+        } else {
+            format!("{:.1}{}", size, UNITS[unit_index])
         }
     }
 
