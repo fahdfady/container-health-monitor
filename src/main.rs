@@ -1,8 +1,12 @@
+use std::ops::Deref;
 use std::process::Command;
 use std::{fmt, str::from_utf8};
 
+use bollard::models::{ContainerInspectResponse, ContainerState as BollardContainerState};
+use bollard::Docker;
 use clap::{Parser, Subcommand};
 use color_print::cprintln;
+use futures_util::future::FutureExt;
 use redis::{self, Client, Commands, RedisResult};
 use serde::{Deserialize, Serialize};
 use sqlx::migrate::MigrateDatabase;
@@ -72,6 +76,24 @@ impl fmt::Display for ContainerState {
     }
 }
 
+impl From<&Option<BollardContainerState>> for ContainerState {
+    fn from(state: &Option<BollardContainerState>) -> Self {
+        match state {
+            Some(state) => match state.status {
+                Some(bollard::models::ContainerStateStatusEnum::CREATED) => Self::Created,
+                Some(bollard::models::ContainerStateStatusEnum::RUNNING) => Self::Running,
+                Some(bollard::models::ContainerStateStatusEnum::PAUSED) => Self::Paused,
+                Some(bollard::models::ContainerStateStatusEnum::RESTARTING) => Self::Restarting,
+                Some(bollard::models::ContainerStateStatusEnum::EXITED) => Self::Exited,
+                Some(bollard::models::ContainerStateStatusEnum::REMOVING) => Self::Removing,
+                Some(bollard::models::ContainerStateStatusEnum::DEAD) => Self::Dead,
+                _ => Self::Stopped,
+            },
+            None => Self::Stopped,
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 enum HealthStatus {
     Healthy,
@@ -97,7 +119,7 @@ struct ContainerHealth {
     name: String,
     status: HealthStatus,
     container_state: ContainerState,
-    restart_count: u32,
+    restart_count: i64,
     cpu_percent: f32,
     memory_usage: String,
     memory_percent: f32,
@@ -150,40 +172,35 @@ impl Default for ContainerHealth {
 }
 
 impl ContainerHealth {
-    pub fn new(container_name: &str) -> Self {
-        // runs command `docker inspect --format "{{.State.Status}}\t{{.State.StartedAt}}\t{{.RestartCount}}" <CONTAINER_NAME>`
-        let inspect_output = Command::new("docker")
-            .args([
-                "inspect",
-                "--format",
-                "{{.State.Status}}\t{{.State.StartedAt}}\t{{.RestartCount}}",
+    pub async fn new(
+        container_name: &str,
+        docker: &Docker,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        // let inspect_options = docker
+        //     .inspect_container(
+        //         container_name,
+        //         Some(bollard::query_parameters::InspectContainerOptions { size: false }),
+        //     )
+        //     .await?;
+
+        let inspect_options = bollard::query_parameters::InspectContainerOptions { size: false };
+
+        let inspect_result: ContainerInspectResponse = docker
+            .inspect_container(
                 container_name,
-            ])
-            .output()
-            .expect("Failed to inspect container");
-
-        let inspects = from_utf8(&inspect_output.stdout)
-            .expect("Failed to get container status")
-            .trim()
-            .split("\t")
-            .collect::<Vec<&str>>();
-
-        let container_state_string: String = inspects.first().unwrap().to_string();
+                Some(bollard::query_parameters::InspectContainerOptions { size: false }),
+            )
+            .await?;
 
         // if container_state_string != "running" {}
 
-        let container_state = match container_state_string.as_str() {
-            "running" => ContainerState::Running,
-            "restarting" => ContainerState::Restarting,
-            "paused" => ContainerState::Paused,
-            _ => ContainerState::Exited,
-        };
+        let container_state: ContainerState = ContainerState::from(&inspect_result.state);
 
-        let started_at = inspects.get(1).unwrap();
+        let started_at = inspect_result.state.unwrap().started_at.unwrap();
 
-        let uptime = Self::calculate_uptime(started_at, &container_state).unwrap();
+        let uptime = Self::calculate_uptime(&started_at, &container_state).unwrap();
 
-        let restart_count = inspects.get(2).unwrap_or(&"0").parse::<u32>().unwrap_or(0);
+        let restart_count = inspect_result.restart_count.unwrap();
 
         // tod: convert all `docker stats` commands into one command, split it with `/t`, collect it, each line represents something we want.
         // runs command `docker stats --no-stream --format "{{.ID}}\t{{.CPUPerc}}\t{{.MemPerc}}\t{{.MemUsage}}" <CONTAINER_NAME>`
@@ -219,7 +236,7 @@ impl ContainerHealth {
             restart_count,
         );
 
-        Self {
+        Ok(Self {
             id,
             name: container_name.to_string(),
             status,
@@ -230,7 +247,7 @@ impl ContainerHealth {
             memory_percent,
             uptime,
             last_updated: chrono::Utc::now().timestamp(),
-        }
+        })
     }
 
     // pub fn refresh(&mut self) {
@@ -269,7 +286,7 @@ impl ContainerHealth {
         container_state: &str,
         cpu_percent: f32,
         memory_percent: f32,
-        restart_count: u32,
+        restart_count: i64,
     ) -> HealthStatus {
         match container_state {
             "running" => {
@@ -406,7 +423,8 @@ async fn monitor_containers(
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         for name in &container_names {
-            let container_health_info = ContainerHealth::new(name);
+            let docker = Docker::connect_with_defaults()?;
+            let container_health_info = ContainerHealth::new(name, &docker).await?;
             let conn_2 = pool.acquire().await?;
 
             container_health_info.store_in_db(conn_2).await?;
