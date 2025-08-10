@@ -1,6 +1,7 @@
 - [x] add a cli utility to enter the data of a container (name)
 - [x] use sqlite for storing
 
+- [ ] check first if docker is running or not and show a proper error message
 - [x] monitor all containers on the machine
 - [x] watch a container for changes
 - [ ] montior containers concurrently
@@ -10,7 +11,7 @@
 - [x] add a container history table in sqlite
     - this will help us track the history of tables, not just the current state, to make dashboards and insights of our containers
 - [ ] utilize redis caching to retrive current info of a container faster
-- [ ] consider using [bollard](https://docs.rs/bollard/latest/bollard/)
+- [x] consider using [bollard](https://docs.rs/bollard/latest/bollard/)
 
 - [ ] special requests via cli
     - [x] Add a `wipe` CLI subcommand For devs or power users who want to start from a clean DB.
