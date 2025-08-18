@@ -1,7 +1,7 @@
 - [x] add a cli utility to enter the data of a container (name)
 - [x] use sqlite for storing
 
-- [ ] check first if docker is running or not and show a proper error message
+- [x] check first if docker is running or not and show a proper error message
 - [x] monitor all containers on the machine
 - [x] watch a container for changes
 - [ ] montior containers concurrently

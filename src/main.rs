@@ -372,19 +372,22 @@ impl ContainerHealth {
         Ok(())
     }
 
-    // async fn store_in_history_db(&self, pool_conn: PoolConnection<Sqlite>) -> Result<(), sqlx::Error> {
-    //     let _add_container_history_query = sqlx::query(
-    //         "
-    //             insert or replace into container_history values (?,?,?,?,?) returning *;
-    //             ",
-    //     )
-    //     .bind(&self.id)
-    //     .bind(&self.name)
-    //     .execute(&mut pool_conn.detach())
-    //     .await?;
+    async fn store_in_history_db(
+        &self,
+        pool_conn: PoolConnection<Sqlite>,
+    ) -> Result<(), sqlx::Error> {
+        let _add_container_history_query = sqlx::query(
+            "
+                insert or replace into container_history values (?,?,?,?,?) returning *;
+                ",
+        )
+        .bind(&self.id)
+        .bind(&self.name)
+        .execute(&mut pool_conn.detach())
+        .await?;
 
-    //     Ok(())
-    // }
+        Ok(())
+    }
 }
 
 #[tokio::main]
@@ -406,6 +409,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cache_ttl,
             watch,
         } => {
+            match check_docker_running() {
+                Ok(_) => {}
+                Err(e) => {
+                    cprintln!("<red>❌ Docker is not running</red>");
+                    cprintln!("<red>Error:</red> {}", e);
+                    return Ok(());
+                }
+            };
+
+            cprintln!("<green>✅ Docker is running!</green>");
+            cprintln!("<blue>Monitoring containers...</blue>");
+
             let container_names = match name.clone() {
                 Some(names) if !names.is_empty() => names,
                 _ => {
@@ -426,6 +441,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             monitor_containers(name.unwrap(), pool, redis_conn, cache_ttl, watch).await?;
         }
         CliCommands::MonitorAll { cache_ttl, watch } => {
+            match check_docker_running() {
+                Ok(_) => {}
+                Err(e) => {
+                    cprintln!("<red>❌ Docker is not running</red>");
+                    cprintln!("<red>Error:</red> {}", e);
+                    return Ok(());
+                }
+            };
+            cprintln!("<green>✅ Docker is running!</green>");
+            cprintln!("<blue>Monitoring containers...</blue>");
             let container_names = get_all_containers()?;
 
             if container_names.is_empty() {
@@ -574,4 +599,20 @@ async fn setup_sqlite_db() -> sqlx::Pool<Sqlite> {
     .unwrap();
 
     pool
+}
+
+fn check_docker_running() -> Result<(), Box<dyn std::error::Error>> {
+    let output = Command::new("docker")
+        .arg("info")
+        .output()
+        .expect("failed to execute docker info command");
+
+    if !output.status.success() {
+        let error_message = from_utf8(&output.stdout).unwrap_or("Unknown error");
+        return Err(Box::new(std::io::Error::other(format!(
+            "Docker is not running: {error_message}"
+        ))));
+    }
+
+    Ok(())
 }
