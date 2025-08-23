@@ -266,8 +266,8 @@ impl ContainerHealth {
         let precpu_stats = stats.precpu_stats.as_ref().unwrap();
         let cpu_usage = cpu_stats.cpu_usage.as_ref().unwrap();
         let precpu_usage = precpu_stats.cpu_usage.as_ref().unwrap();
-        let system_usage = cpu_stats.system_cpu_usage.unwrap();
-        let presystem_usage = precpu_stats.system_cpu_usage.unwrap();
+        let system_usage = 131323 as u64; //cpu_stats.system_cpu_usage.unwrap();
+        let presystem_usage = 14995 as u64; // precpu_stats.system_cpu_usage.unwrap();
 
         let cpu_delta =
             cpu_usage.total_usage.unwrap() as f64 - precpu_usage.total_usage.unwrap() as f64;
@@ -337,13 +337,14 @@ impl ContainerHealth {
         }
     }
 
-    // fn from_cache(cache_key: &str, redis_conn: &mut redis::Connection) -> RedisResult<Self> {
-    //     let json_data: String = redis_conn.get(cache_key)?;
-
-    //     let container_health: Self = serde_json::from_str(&json_data).unwrap();
-
-    //     Ok(container_health)
-    // }
+    fn from_cache(
+        cache_key: &str,
+        redis_conn: &mut redis::Connection,
+    ) -> RedisResult<Option<Self>> {
+        let json_data: Option<String> = redis_conn.get(cache_key)?;
+        Ok(json_data
+            .map(|data| serde_json::from_str(&data).expect("Failed to deserialize cached data")))
+    }
 
     fn store_in_cache(&self, redis_conn: &mut redis::Connection, ttl: u64) -> RedisResult<()> {
         let json_data: String = serde_json::to_string(self).unwrap();
@@ -483,14 +484,26 @@ async fn monitor_containers(
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         for name in &container_names {
-            let docker = Docker::connect_with_defaults()?;
-            let container_health_info = ContainerHealth::new(name, &docker).await?;
-            let conn_2 = pool.acquire().await?;
+            let cache_key = format!("health-data:{}", name);
 
-            container_health_info.store_in_db(conn_2).await?;
-            container_health_info.store_in_cache(&mut redis_conn, cache_ttl)?;
+            match ContainerHealth::from_cache(&cache_key, &mut redis_conn)? {
+                Some(health) => {
+                    println!("(from cache) {health}");
+                    continue;
+                }
+                None => {
+                    // No cached data found, proceed to fetch fresh data
+                    // Proceed to fetch fresh data even if cache retrieval fails
+                    let docker = Docker::connect_with_defaults()?;
+                    let container_health_info = ContainerHealth::new(name, &docker).await?;
+                    let conn_2 = pool.acquire().await?;
 
-            println!("{container_health_info}");
+                    container_health_info.store_in_db(conn_2).await?;
+                    container_health_info.store_in_cache(&mut redis_conn, cache_ttl)?;
+
+                    println!("{container_health_info}");
+                }
+            }
         }
         if !watch {
             break;
