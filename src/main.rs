@@ -6,14 +6,13 @@ use bollard::Docker;
 use clap::{Parser, Subcommand};
 use color_print::cprintln;
 use futures_util::StreamExt;
-use redis::{self, Client, Commands, RedisResult};
 use serde::{Deserialize, Serialize};
 use sqlx::migrate::MigrateDatabase;
 use sqlx::pool::PoolConnection;
 use sqlx::Sqlite;
 
 #[derive(Parser)]
-#[command(version, about, long_about = None)] // Read from `Cargo.toml`
+#[command(version, about, long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: CliCommands,
@@ -26,18 +25,12 @@ enum CliCommands {
         #[arg(short, long)]
         name: Option<Vec<String>>,
 
-        #[arg(short, long, default_value_t = 60)]
-        cache_ttl: u64, // cache time-to-live in seconds
-
         #[arg(short, long, default_value_t = false)]
         watch: bool,
     },
 
     /// monitor all container on the machine
     MonitorAll {
-        #[arg(short, long, default_value_t = 60)]
-        cache_ttl: u64, // cache time-to-live in seconds
-
         #[arg(short, long, default_value_t = false)]
         watch: bool, // BUG: adding watch here, does not watch for newly created containers, only ones which existed when starting the CLI
     },
@@ -158,7 +151,6 @@ impl Default for ContainerHealth {
             id: "".to_string(),
             name: "container".to_string(),
             status: HealthStatus::Healthy,
-            // need to revise what is the default State.Status of a container
             container_state: ContainerState::Exited,
             restart_count: 0,
             cpu_percent: 0.0,
@@ -180,8 +172,6 @@ impl ContainerHealth {
         let inspect_result: ContainerInspectResponse = docker
             .inspect_container(container_name, Some(inspect_options))
             .await?;
-
-        // if container_state_string != "running" {}
 
         let container_state: ContainerState = ContainerState::from(&inspect_result.state);
 
@@ -229,11 +219,6 @@ impl ContainerHealth {
         })
     }
 
-    // pub fn refresh(&mut self) {
-    //     *self = Self::new(&self.name);
-    // }
-
-    /// take start_time and minus the current timestamp from it, returning a formatted human-readble uptime
     fn calculate_uptime(
         started_at: &str,
         container_status: &ContainerState,
@@ -337,25 +322,6 @@ impl ContainerHealth {
         }
     }
 
-    fn from_cache(
-        cache_key: &str,
-        redis_conn: &mut redis::Connection,
-    ) -> RedisResult<Option<Self>> {
-        let json_data: Option<String> = redis_conn.get(cache_key)?;
-        Ok(json_data
-            .map(|data| serde_json::from_str(&data).expect("Failed to deserialize cached data")))
-    }
-
-    fn store_in_cache(&self, redis_conn: &mut redis::Connection, ttl: u64) -> RedisResult<()> {
-        let json_data: String = serde_json::to_string(self).unwrap();
-
-        let cache_key = format!("health-data:{}", self.name);
-
-        let _: () = redis_conn.set_ex(cache_key, json_data, ttl)?;
-
-        Ok(())
-    }
-
     async fn store_in_db(&self, pool_conn: PoolConnection<Sqlite>) -> Result<(), sqlx::Error> {
         let _add_containers_query = sqlx::query(
             "
@@ -399,17 +365,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pool = setup_sqlite_db().await;
 
-    cprintln!("🔌 Connecting to Redis...");
-    let redis_client = Client::open("redis://127.0.0.1/")?;
-    let redis_conn = redis_client.get_connection()?;
-    cprintln!("<green>✅ Redis connected!</green>");
-
     match cli.command {
-        CliCommands::Monitor {
-            name,
-            cache_ttl,
-            watch,
-        } => {
+        CliCommands::Monitor { name, watch } => {
             match check_docker_running() {
                 Ok(_) => {}
                 Err(e) => {
@@ -435,13 +392,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if !state_of_container {
                     eprintln!("container {name} not found on your machine");
                 }
-                // else {
-                // }
             }
 
-            monitor_containers(name.unwrap(), pool, redis_conn, cache_ttl, watch).await?;
+            monitor_containers(name.unwrap(), pool, watch).await?;
         }
-        CliCommands::MonitorAll { cache_ttl, watch } => {
+        CliCommands::MonitorAll { watch } => {
             match check_docker_running() {
                 Ok(_) => {}
                 Err(e) => {
@@ -459,15 +414,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
 
-            monitor_containers(container_names, pool, redis_conn, cache_ttl, watch).await?;
+            monitor_containers(container_names, pool, watch).await?;
         }
         CliCommands::Wipe => {
-            // delete the database file
             let db_path = std::path::Path::new("./data/monitor.db");
-
-            // remove the db file, not the directory, user might have done something inside the dir and we don't want them to suffer.
             std::fs::remove_file(db_path)?;
-
             cprintln!("<green>🗑️  Successfully wiped all data</green>");
         }
     }
@@ -478,38 +429,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn monitor_containers(
     container_names: Vec<String>,
     pool: sqlx::Pool<Sqlite>,
-    mut redis_conn: redis::Connection,
-    cache_ttl: u64,
     watch: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         for name in &container_names {
-            let cache_key = format!("health-data:{}", name);
+            let docker = Docker::connect_with_defaults()?;
+            let container_health_info = ContainerHealth::new(name, &docker).await?;
+            let conn = pool.acquire().await?;
 
-            match ContainerHealth::from_cache(&cache_key, &mut redis_conn)? {
-                Some(health) => {
-                    println!("(from cache) {health}");
-                    continue;
-                }
-                None => {
-                    // No cached data found, proceed to fetch fresh data
-                    // Proceed to fetch fresh data even if cache retrieval fails
-                    let docker = Docker::connect_with_defaults()?;
-                    let container_health_info = ContainerHealth::new(name, &docker).await?;
-                    let conn_2 = pool.acquire().await?;
+            container_health_info.store_in_db(conn).await?;
 
-                    container_health_info.store_in_db(conn_2).await?;
-                    container_health_info.store_in_cache(&mut redis_conn, cache_ttl)?;
-
-                    println!("{container_health_info}");
-                }
-            }
+            println!("{container_health_info}");
         }
         if !watch {
             break;
         };
 
-        // add waiting 5 seconds for each watch (todo: review how many seconds might be appropiate)
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     }
 
@@ -532,7 +467,6 @@ fn get_all_containers() -> Result<Vec<String>, Box<dyn std::error::Error>> {
     Ok(container_names)
 }
 
-/// takes a container name an validates if docker recognizes it
 fn is_container_in_list(container_name: &str) -> bool {
     let mut stat: bool = false;
 
@@ -578,7 +512,6 @@ async fn setup_sqlite_db() -> sqlx::Pool<Sqlite> {
         .await
         .expect("failed to acquire connection pool");
 
-    // database setup
     let _setup_containers_table_query = sqlx::query(
         "
         create table if not exists containers (
@@ -593,6 +526,7 @@ async fn setup_sqlite_db() -> sqlx::Pool<Sqlite> {
     .execute(&mut conn_1.detach())
     .await
     .unwrap();
+
     let _setup_container_history_table_query = sqlx::query(
         "
         create table if not exists container_history (
@@ -629,3 +563,4 @@ fn check_docker_running() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
